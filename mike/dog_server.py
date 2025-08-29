@@ -429,7 +429,7 @@ class DogServer:
                 elif command.mode != "walk":
                     print(f"{time.strftime('%H:%M:%S')} - 🎮  {command.mode} from {client_ip}")
                 else:
-                    print(f"{time.strftime('%H:%M:%S')} - ⏹️  Stop from {client_ip}")
+                    print(f"{time.strftime('%H:%M:%S')} - 🛑  Stop from {client_ip}")
                 
                 success = self.robot.execute_command(command)
                 

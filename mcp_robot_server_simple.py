@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-MCP Server for Unitree Go2 Robot Control
+MCP Server for Unitree Go2 Robot Control (No Ball Detection)
 
 Provides Claude with access to:
 - Camera feed and image capture
 - Robot pose and position data
 - Robot movement control
-- Ball detection and localization
 - Lidar point cloud data
 """
 
@@ -71,10 +70,6 @@ class RobotMCPServer:
         # Point cloud data
         self.latest_pointcloud = None
         self.has_pointcloud = False
-        
-        # Ball detection parameters (COMMENTED OUT)
-        # self.ball_diameter = 0.5  # 50cm
-        # self.current_ball_position = None
         
         # Setup subscribers
         self._setup_subscribers()
@@ -288,30 +283,6 @@ class RobotMCPServer:
                     }
                 ),
                 
-                # Ball detection tools (COMMENTED OUT)
-                # types.Tool(
-                #     name="detect_green_ball",
-                #     description="Detect and localize green ball in camera view using RGB(90,180,120)",
-                #     inputSchema={
-                #         "type": "object",
-                #         "properties": {
-                #             "use_3d_validation": {
-                #                 "type": "boolean",
-                #                 "description": "Use 3D point cloud for validation (default true)"
-                #             }
-                #         }
-                #     }
-                # ),
-                
-                # types.Tool(
-                #     name="get_ball_position",
-                #     description="Get current detected ball position in world coordinates",
-                #     inputSchema={
-                #         "type": "object",
-                #         "properties": {}
-                #     }
-                # ),
-                
                 # Utility tools
                 types.Tool(
                     name="get_robot_status",
@@ -346,10 +317,6 @@ class RobotMCPServer:
                     return await self._disable_lidar(arguments)
                 elif name == "get_point_cloud_data":
                     return await self._get_point_cloud_data(arguments)
-                # elif name == "detect_green_ball":
-                #     return await self._detect_green_ball(arguments)
-                # elif name == "get_ball_position":
-                #     return await self._get_ball_position(arguments)
                 elif name == "get_robot_status":
                     return await self._get_robot_status(arguments)
                 else:
@@ -639,152 +606,6 @@ f"\n\nFull data available as JSON: {json.dumps(points[:100])}"  # Return first 1
                 text=f"Failed to parse point cloud: {str(e)}"
             )]
     
-    # COMMENTED OUT - Ball detection functionality
-    # async def _detect_green_ball(self, args: dict) -> list[types.TextContent]:
-    #     """Detect green ball using camera and optional 3D validation"""
-        use_3d = args.get('use_3d_validation', True)
-        
-        try:
-            # Get camera image
-            code, data = self.video_client.GetImageSample()
-            if code != 0:
-                return [types.TextContent(
-                    type="text",
-                    text=f"Camera error: {code}"
-                )]
-                
-            image_data = np.frombuffer(bytes(data), dtype=np.uint8)
-            frame = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
-            
-            if frame is None:
-                return [types.TextContent(
-                    type="text",
-                    text="Failed to decode camera image"
-                )]
-            
-            # Ball detection (RGB 90,180,120)
-            target_rgb = np.uint8([[[90, 180, 120]]])
-            target_hsv = cv2.cvtColor(target_rgb, cv2.COLOR_RGB2HSV)[0][0]
-            
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            
-            # HSV range
-            h_tolerance, s_tolerance, v_tolerance = 15, 60, 60
-            hsv_lower = np.array([
-                max(0, target_hsv[0] - h_tolerance),
-                max(0, target_hsv[1] - s_tolerance),
-                max(0, target_hsv[2] - v_tolerance)
-            ])
-            hsv_upper = np.array([
-                min(179, target_hsv[0] + h_tolerance),
-                min(255, target_hsv[1] + s_tolerance),
-                min(255, target_hsv[2] + v_tolerance)
-            ])
-            
-            mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
-            
-            # Clean mask
-            kernel = np.ones((5, 5), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-            
-            # Find contours
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            if not contours:
-                return [types.TextContent(
-                    type="text",
-                    text="No green ball detected in camera view."
-                )]
-            
-            # Find largest contour
-            largest_contour = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(largest_contour)
-            
-            if area < 200:
-                return [types.TextContent(
-                    type="text",
-                    text="Green object detected but too small to be the ball."
-                )]
-            
-            # Get circle
-            (x, y), radius = cv2.minEnclosingCircle(largest_contour)
-            center = (int(x), int(y))
-            
-            if radius < 15:
-                return [types.TextContent(
-                    type="text", 
-                    text="Green object detected but appears too small."
-                )]
-            
-            # Basic validation without 3D for now
-            result = f"""Green Ball Detected:
-Screen Position: ({center[0]}, {center[1]})
-Radius: {radius:.1f} pixels
-Area: {area:.0f} pixels
-Confidence: {'High' if area > 500 and radius > 25 else 'Medium'}"""
-            
-            # Store detection for get_ball_position
-            # For now, estimate 3D position using simple camera model
-            if self.has_pose_data:
-                # Simple distance estimation
-                estimated_distance = (self.ball_diameter * 400) / (radius * 2)  # Rough estimate
-                estimated_distance = max(0.5, min(estimated_distance, 10.0))
-                
-                # Calculate world position (simplified)
-                angle_h = (center[0] - frame.shape[1]/2) / (frame.shape[1]/2) * 35 * math.pi / 180  # 35° half FOV
-                
-                rel_x = estimated_distance * math.cos(angle_h)
-                rel_y = estimated_distance * math.sin(angle_h)
-                
-                world_x = self.robot_x + rel_x * math.cos(self.robot_yaw) - rel_y * math.sin(self.robot_yaw)
-                world_y = self.robot_y + rel_x * math.sin(self.robot_yaw) + rel_y * math.cos(self.robot_yaw)
-                world_z = self.robot_z  # Assume ball on ground
-                
-                self.current_ball_position = (world_x, world_y, world_z)
-                
-                result += f"\nEstimated 3D Position: ({world_x:.2f}, {world_y:.2f}, {world_z:.2f})"
-                result += f"\nDistance: {estimated_distance:.2f}m"
-            
-            return [types.TextContent(
-                type="text",
-                text=result
-            )]
-            
-        except Exception as e:
-            return [types.TextContent(
-                type="text",
-                text=f"Ball detection failed: {str(e)}"
-            )]
-    
-    # async def _get_ball_position(self, args: dict) -> list[types.TextContent]:
-    #     """Get current ball position"""
-        if self.current_ball_position is None:
-            return [types.TextContent(
-                type="text",
-                text="No ball position available. Run detect_green_ball first."
-            )]
-        
-        x, y, z = self.current_ball_position
-        if self.has_pose_data:
-            distance = math.sqrt((x - self.robot_x)**2 + (y - self.robot_y)**2)
-            angle = math.atan2(y - self.robot_y, x - self.robot_x)
-            relative_angle = angle - self.robot_yaw
-            
-            return [types.TextContent(
-                type="text",
-                text=f"""Ball Position:
-World Coordinates: ({x:.2f}, {y:.2f}, {z:.2f})
-Distance from Robot: {distance:.2f}m  
-Relative Angle: {math.degrees(relative_angle):.1f}° (0° = straight ahead)
-Direction: {math.degrees(angle):.1f}° from world east"""
-            )]
-        else:
-            return [types.TextContent(
-                type="text",
-                text=f"Ball Position: ({x:.2f}, {y:.2f}, {z:.2f})"
-            )]
-    
     async def _get_robot_status(self, args: dict) -> list[types.TextContent]:
         """Get comprehensive robot status"""
         status = "=== Unitree Go2 Robot Status ===\n\n"
@@ -819,13 +640,6 @@ Direction: {math.degrees(angle):.1f}° from world east"""
         # Movement status
         status += f"Movement: {'✅ Standing (can move)' if self.is_standing else '⚠️  Lying down (use robot_stand_up)'}\n"
         
-        # Ball detection status (COMMENTED OUT)
-        # if self.current_ball_position:
-        #     x, y, z = self.current_ball_position
-        #     status += f"Ball Detection: ✅ Ball at ({x:.2f}, {y:.2f}, {z:.2f})\n"
-        # else:
-        #     status += "Ball Detection: ❌ No ball detected\n"
-        
         return [types.TextContent(
             type="text",
             text=status
@@ -851,7 +665,7 @@ async def main():
     import sys
     network_interface = sys.argv[1] if len(sys.argv) > 1 else None
     
-    print(f"Starting Unitree Go2 MCP Server...")
+    print(f"Starting Unitree Go2 MCP Server (No Ball Detection)...")
     if network_interface:
         print(f"Using network interface: {network_interface}")
     

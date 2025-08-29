@@ -57,6 +57,13 @@ except ImportError as e:
     SDK_AVAILABLE = False
     print(f"⚠️  Unitree SDK not available: {e}")
 
+# Import Claude integration
+from claude_interface import ClaudeInterface
+
+# Disable HTTP request logging from Anthropic client
+import logging
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 def get_local_ip() -> str:
     """Get the local IP address that can be reached by other computers"""
     try:
@@ -94,14 +101,14 @@ def detect_network_interfaces() -> List[str]:
                         interfaces.append(iface)
         
         # Common interface names to try if detection fails
-        fallback_interfaces = ['wlan0', 'eth0', 'enp2s0', 'en0', 'wlp3s0']
+        fallback_interfaces = ['en7', 'en0', 'eth0', 'wlan0', 'enp2s0', 'wlp3s0']
         for iface in fallback_interfaces:
             if iface not in interfaces:
                 interfaces.append(iface)
                 
     except Exception as e:
         logging.warning(f"Interface detection failed: {e}")
-        interfaces = ['eth0', 'wlan0', 'en0']
+        interfaces = ['en7', 'en0', 'eth0', 'wlan0']
     
     return interfaces
 
@@ -109,29 +116,36 @@ def find_go2_interface() -> Optional[str]:
     """Try to find the interface connected to Go2 robot"""
     interfaces = detect_network_interfaces()
     
-    # Try to ping Go2's default IP on each interface
-    go2_ip = "192.168.12.1"
+    # First check if robot is reachable
+    go2_ips = ["192.168.123.18", "192.168.12.1"]
+    robot_reachable = False
     
-    for interface in interfaces:
+    for go2_ip in go2_ips:
         try:
-            # Try a quick ping test
             if platform.system() == "Darwin":
                 result = subprocess.run(
-                    ["ping", "-c", "1", "-W", "1000", "-I", interface, go2_ip],
+                    ["ping", "-c", "1", "-W", "1000", go2_ip],
                     capture_output=True, timeout=2
                 )
             else:
                 result = subprocess.run(
-                    ["ping", "-c", "1", "-W", "1", "-I", interface, go2_ip],
+                    ["ping", "-c", "1", "-W", "1", go2_ip],
                     capture_output=True, timeout=2
                 )
             
             if result.returncode == 0:
-                logging.info(f"Found Go2 robot on interface {interface}")
-                return interface
-                
+                robot_reachable = True
+                logging.info(f"Found Go2 robot at {go2_ip}")
+                break
         except Exception:
             continue
+    
+    if robot_reachable:
+        # Return first ethernet-like interface (en* on macOS)
+        eth_interfaces = [i for i in interfaces if i.startswith('en') and i != 'en0']  # Skip en0 (usually wifi)
+        if eth_interfaces:
+            logging.info(f"Using ethernet interface: {eth_interfaces[0]}")
+            return eth_interfaces[0]
     
     # If no ping success, return the first wireless interface
     wifi_interfaces = [i for i in interfaces if any(x in i.lower() for x in ['wlan', 'wifi', 'wl'])]
@@ -355,6 +369,81 @@ class Go2RobotController:
             
         return None
     
+    def capture_picture(self, filename: Optional[str] = None) -> Optional[str]:
+        """Capture a picture from the camera and save to disk"""
+        frame = self.get_camera_frame()
+        if frame is None:
+            return None
+        
+        if filename is None:
+            # Generate filename with timestamp
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"robot_photo_{timestamp}.jpg"
+        
+        # Save to current directory
+        filepath = os.path.abspath(filename)
+        success = cv2.imwrite(filepath, frame)
+        
+        if success:
+            print(f"📸 Picture saved: {filepath}")
+            return filepath
+        else:
+            print("❌ Failed to save picture")
+            return None
+    
+    def move_robot(self, vx: float, vy: float, vyaw: float) -> bool:
+        """Move robot using real SportClient API"""
+        try:
+            self.last_command_time = time.time()
+            
+            if SDK_AVAILABLE and self.connected and self.sport_client:
+                # Use real SDK like euan branch
+                print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending to robot: vx={vx:.1f}, vy={vy:.1f}, vyaw={vyaw:.1f}")
+                result = self.sport_client.Move(vx, vy, vyaw)
+                return result == 0  # SDK returns 0 for success
+            else:
+                # Mock mode for testing
+                print(f"{time.strftime('%H:%M:%S')} - 🚷 Would send to robot: vx={vx:.1f}, vy={vy:.1f}, vyaw={vyaw:.1f}")
+                return True
+                
+        except Exception as e:
+            print(f"❌ Move command failed: {e}")
+            return False
+    
+    def execute_pose_command(self, pose_cmd: str) -> bool:
+        """Execute pose command using real SportClient API"""
+        try:
+            self.last_command_time = time.time()
+            
+            if SDK_AVAILABLE and self.connected and self.sport_client:
+                # Use real SDK methods like euan branch
+                if pose_cmd == "standup":
+                    print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending StandUp() to robot")
+                    return self.sport_client.StandUp() == 0
+                elif pose_cmd == "standdown":
+                    print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending StandDown() to robot")
+                    return self.sport_client.StandDown() == 0
+                elif pose_cmd == "recovery":
+                    print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending RecoveryStand() to robot")
+                    return self.sport_client.RecoveryStand() == 0
+                elif pose_cmd == "stop":
+                    print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending StopMove() to robot")
+                    return self.sport_client.StopMove() == 0
+                elif pose_cmd == "damp":
+                    print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending Damp() to robot")
+                    return self.sport_client.Damp() == 0
+                else:
+                    print(f"❌ Unknown pose command: {pose_cmd}")
+                    return False
+            else:
+                # Mock mode for testing
+                print(f"{time.strftime('%H:%M:%S')} - 🚷 Would send pose command to robot: {pose_cmd}")
+                return True
+                
+        except Exception as e:
+            print(f"❌ Pose command failed: {e}")
+            return False
+    
     def emergency_stop(self):
         """Emergency stop the robot"""
         stop_cmd = MovementCommand(velocity_x=0, velocity_y=0, angular_velocity=0, mode="stand")
@@ -372,19 +461,8 @@ class Go2RobotController:
                 self.emergency_stop()
                 self.state.mode = "idle"
         
-        # Read from actual sensors if connected
-        if self.sport_client:
-            try:
-                robot_state = self.sport_client.GetState()
-                # Update state with real robot data
-                self.state.battery_level = robot_state.battery_percentage if hasattr(robot_state, 'battery_percentage') else 100.0
-                self.state.position["x"] = robot_state.position[0] if hasattr(robot_state, 'position') else 0
-                self.state.position["y"] = robot_state.position[1] if hasattr(robot_state, 'position') else 0
-                self.state.position["z"] = robot_state.position[2] if hasattr(robot_state, 'position') else 0
-                # Add more state updates as needed
-            except Exception as e:
-                logging.warning(f"⚠️  State update failed: {e}")
-                pass
+        # TODO: Subscribe to robot state messages (SportModeState) for real robot data
+        # For now, just update timestamp and keep mock state
         
         self.state.timestamp = time.time()
 
@@ -395,6 +473,11 @@ class DogServer:
         self.host = host
         self.port = port
         self.robot = Go2RobotController()
+        self.claude = ClaudeInterface()
+        if self.claude.connected:
+            print("🤖 Claude connected and ready")
+        else:
+            print("❌ Claude not connected - check API key")
         self.connected_clients: Dict[str, websockets.WebSocketServerProtocol] = {}
         self.running = False
         
@@ -527,6 +610,113 @@ class DogServer:
                         "error": "No camera available"
                     }))
                     
+            elif msg_type == "natural_language_command":
+                # Natural language command processing via Claude
+                command_text = data.get("command", "")
+                print(f"{time.strftime('%H:%M:%S')} - 🗣️  Human: '{command_text}'")
+                
+                # Get current robot state for context
+                robot_state = asdict(self.robot.state)
+                
+                # Process with Claude (robot command mode)
+                try:
+                    print(f"{time.strftime('%H:%M:%S')} - 🤖 Processing with Claude...")
+                    result = await self.claude.process_natural_language_command(command_text, robot_state, use_robot_prompt=True)
+                    print(f"{time.strftime('%H:%M:%S')} - 🤖 Claude result: {result}")
+                except Exception as claude_error:
+                    print(f"{time.strftime('%H:%M:%S')} - ❌ Claude processing error: {claude_error}")
+                    import traceback
+                    print(f"Full Claude error traceback: {traceback.format_exc()}")
+                    result = {"success": False, "error": f"Claude processing failed: {claude_error}"}
+                
+                if result["success"] and "response" in result:
+                    response_data = result["response"]
+                    action = response_data.get("action", "info")
+                    
+                    # Execute robot command(s) based on Claude's response
+                    if action == "move" and "command" in response_data:
+                        try:
+                            cmd_data = response_data["command"]
+                            vx = cmd_data.get("vx", 0.0)
+                            vy = cmd_data.get("vy", 0.0)
+                            vyaw = cmd_data.get("vyaw", 0.0)
+                            
+                            print(f"{time.strftime('%H:%M:%S')} - 🎮 Move command: vx={vx}, vy={vy}, vyaw={vyaw}")
+                            
+                            # Use real SportClient API (like we had in our branch)
+                            success = self.robot.move_robot(vx, vy, vyaw)
+                            if not success:
+                                print(f"❌ Failed to execute move command")
+                                
+                        except Exception as e:
+                            print(f"❌ Movement command error: {e}")
+                    
+                    elif action == "pose" and "command" in response_data:
+                        try:
+                            pose_cmd = response_data["command"]
+                            print(f"{time.strftime('%H:%M:%S')} - 🎮 Pose command: {pose_cmd}")
+                            
+                            # Use real SportClient pose methods (like we had in our branch)
+                            success = self.robot.execute_pose_command(pose_cmd)
+                            if not success:
+                                print(f"❌ Failed to execute pose command: {pose_cmd}")
+                                
+                        except Exception as e:
+                            print(f"❌ Pose command error: {e}")
+                    
+                    elif action == "sequence" and "sequence" in response_data:
+                        # Execute sequence of commands with timing
+                        sequence_str = response_data["sequence"]
+                        print(f"{time.strftime('%H:%M:%S')} - 🎮 Robot sequence: {sequence_str}")
+                        
+                        asyncio.create_task(self.execute_sequence_string(sequence_str))
+                    
+                    elif action == "capture_picture":
+                        filepath = self.robot.capture_picture()
+                        if filepath:
+                            # Open the picture file for the user
+                            try:
+                                import subprocess
+                                import platform
+                                if platform.system() == "Darwin":  # macOS
+                                    subprocess.run(["open", filepath])
+                                elif platform.system() == "Windows":
+                                    subprocess.run(["start", filepath], shell=True)
+                                else:  # Linux
+                                    subprocess.run(["xdg-open", filepath])
+                                
+                                print(f"📸 Picture captured and opened: {filepath}")
+                                
+                            except Exception as e:
+                                print(f"❌ Failed to open picture: {e}")
+                        else:
+                            print("❌ Failed to capture picture - camera not available")
+                    
+                    # Print and send English message and dogspeak to client
+                    english_message = response_data.get("english_message", "")
+                    dogspeak = response_data.get("dogspeak", "")
+                    
+                    if english_message:
+                        print(f"{time.strftime('%H:%M:%S')} - ☀️  English: '{english_message}'")
+                    if dogspeak:
+                        print(f"{time.strftime('%H:%M:%S')} - 🐕 Dogspeak: '{dogspeak}'")
+                    
+                    await websocket.send(json.dumps({
+                        "type": "natural_language_response",
+                        "success": True,
+                        "english_message": english_message,
+                        "dogspeak": dogspeak,
+                        "timestamp": time.time()
+                    }))
+                else:
+                    # Error in Claude processing
+                    await websocket.send(json.dumps({
+                        "type": "natural_language_response",
+                        "success": False,
+                        "error": result.get("error", "Unknown error"),
+                        "timestamp": time.time()
+                    }))
+            
             elif msg_type == "emergency_stop":
                 # Emergency stop
                 self.robot.emergency_stop()
@@ -545,6 +735,27 @@ class DogServer:
                 "type": "error", 
                 "message": str(e)
             }))
+    
+    async def execute_sequence_string(self, sequence_str):
+        """Execute a sequence from a string format like 'standdown wait(2) standup wait(2)'"""
+        steps = sequence_str.split()
+        for i, step in enumerate(steps):
+            try:
+                if step.startswith('wait(') and step.endswith(')'):
+                    # Parse wait command
+                    duration_str = step[5:-1]  # Remove 'wait(' and ')'
+                    duration = float(duration_str)
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Step {i+1}: wait ({duration}s)")
+                    await asyncio.sleep(duration)
+                else:
+                    # Execute pose command using real SDK
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Step {i+1}: {step}")
+                    success = self.robot.execute_pose_command(step)
+                    if not success:
+                        print(f"❌ Failed to execute sequence step {i+1}: {step}")
+                
+            except Exception as e:
+                print(f"❌ Sequence step {i+1} error: {e}")
     
     async def broadcast_message(self, message: dict):
         """Broadcast message to all connected clients"""

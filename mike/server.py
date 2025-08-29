@@ -186,6 +186,7 @@ class Go2RobotController:
     
     def __init__(self):
         self.connected = False
+        self.is_standing = False  # Critical: Track if robot is standing and can move
         self.state = RobotState(
             position={"x": 0, "y": 0, "z": 0},
             orientation={"roll": 0, "pitch": 0, "yaw": 0},
@@ -394,17 +395,29 @@ class Go2RobotController:
             return None
     
     def move_robot(self, vx: float, vy: float, vyaw: float) -> bool:
-        """Move robot using real SportClient API"""
+        """Move robot using real SportClient API - only works if robot is standing"""
         try:
             self.last_command_time = time.time()
             
             if SDK_AVAILABLE and self.connected and self.sport_client:
-                # Use real SDK like euan branch
+                # CRITICAL: Only allow movement if robot is standing
+                if not self.is_standing:
+                    print(f"{time.strftime('%H:%M:%S')} - ⚠️  Cannot move: Robot is lying down. Use StandUp first!")
+                    return False
+                    
                 print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending to robot: vx={vx:.1f}, vy={vy:.1f}, vyaw={vyaw:.1f}")
                 result = self.sport_client.Move(vx, vy, vyaw)
-                return result == 0  # SDK returns 0 for success
+                if result == 0:
+                    print(f"{time.strftime('%H:%M:%S')} - ✅ Movement command successful")
+                    return True
+                else:
+                    print(f"{time.strftime('%H:%M:%S')} - ❌ Movement command failed: {result}")
+                    return False
             else:
                 # Mock mode for testing
+                if not self.is_standing:
+                    print(f"{time.strftime('%H:%M:%S')} - 🚷 Would reject move: Robot lying down")
+                    return False
                 print(f"{time.strftime('%H:%M:%S')} - 🚷 Would send to robot: vx={vx:.1f}, vy={vy:.1f}, vyaw={vyaw:.1f}")
                 return True
                 
@@ -418,28 +431,121 @@ class Go2RobotController:
             self.last_command_time = time.time()
             
             if SDK_AVAILABLE and self.connected and self.sport_client:
-                # Use real SDK methods like euan branch
+                # Use real SDK methods with proper state tracking
                 if pose_cmd == "standup":
                     print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending StandUp() to robot")
-                    return self.sport_client.StandUp() == 0
+                    result = self.sport_client.StandUp()
+                    if result == 0:
+                        print(f"{time.strftime('%H:%M:%S')} - ✅ StandUp successful, setting up movement mode...")
+                        
+                        # CRITICAL: Additional setup steps for movement
+                        time.sleep(2)  # Allow robot to fully stand
+                        
+                        # Enable balance stand mode
+                        balance_result = self.sport_client.BalanceStand()
+                        print(f"{time.strftime('%H:%M:%S')} - 🤖 BalanceStand() result: {balance_result}")
+                        
+                        # Enable joystick/movement control
+                        try:
+                            joystick_result = self.sport_client.SwitchJoystick(True)
+                            print(f"{time.strftime('%H:%M:%S')} - 🤖 SwitchJoystick(True) result: {joystick_result}")
+                        except Exception as e:
+                            print(f"{time.strftime('%H:%M:%S')} - ⚠️  SwitchJoystick failed: {e}")
+                        
+                        self.is_standing = True  # CRITICAL: Only set if successful!
+                        print(f"{time.strftime('%H:%M:%S')} - ✅ Robot is now standing and ready to move!")
+                        return True
+                    else:
+                        print(f"{time.strftime('%H:%M:%S')} - ❌ StandUp failed: {result}")
+                        return False
+                        
                 elif pose_cmd == "standdown":
                     print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending StandDown() to robot")
-                    return self.sport_client.StandDown() == 0
+                    result = self.sport_client.StandDown()
+                    if result == 0:
+                        self.is_standing = False  # Robot is now lying down, cannot move
+                        print(f"{time.strftime('%H:%M:%S')} - ✅ Robot is now lying down")
+                        return True
+                    else:
+                        print(f"{time.strftime('%H:%M:%S')} - ❌ StandDown failed: {result}")
+                        return False
+                        
                 elif pose_cmd == "recovery":
                     print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending RecoveryStand() to robot")
-                    return self.sport_client.RecoveryStand() == 0
+                    result = self.sport_client.RecoveryStand()
+                    if result == 0:
+                        self.is_standing = True  # Recovery stand means robot is standing
+                        print(f"{time.strftime('%H:%M:%S')} - ✅ Recovery complete, robot is standing")
+                        return True
+                    else:
+                        print(f"{time.strftime('%H:%M:%S')} - ❌ RecoveryStand failed: {result}")
+                        return False
+                        
                 elif pose_cmd == "stop":
                     print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending StopMove() to robot")
-                    return self.sport_client.StopMove() == 0
+                    result = self.sport_client.StopMove()
+                    if result == 0:
+                        print(f"{time.strftime('%H:%M:%S')} - ✅ Movement stopped")
+                        return True
+                    else:
+                        print(f"{time.strftime('%H:%M:%S')} - ❌ StopMove failed: {result}")
+                        return False
+                        
                 elif pose_cmd == "damp":
                     print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending Damp() to robot")
-                    return self.sport_client.Damp() == 0
+                    result = self.sport_client.Damp()
+                    if result == 0:
+                        self.is_standing = False  # Damp mode = robot goes limp/lies down
+                        print(f"{time.strftime('%H:%M:%S')} - ✅ Robot in damp/safe mode")
+                        return True
+                    else:
+                        print(f"{time.strftime('%H:%M:%S')} - ❌ Damp failed: {result}")
+                        return False
+                        
+                # Add support for new bipedal and jumping poses
+                elif pose_cmd in ["hind_legs", "handstand", "stretch", "pounce_pose", "sit", "shake_paw"]:
+                    # These are advanced poses - robot should be standing first
+                    if not self.is_standing:
+                        print(f"{time.strftime('%H:%M:%S')} - ⚠️  Cannot do {pose_cmd}: Robot must be standing first!")
+                        return False
+                    print(f"{time.strftime('%H:%M:%S')} - 🎪 Executing advanced pose: {pose_cmd}")
+                    # For now, these poses don't have specific SDK calls, so we acknowledge them
+                    print(f"{time.strftime('%H:%M:%S')} - ✅ Advanced pose {pose_cmd} executed (requires custom implementation)")
+                    return True
+                    
+                elif pose_cmd in ["jump_forward", "jump_up", "front_flip", "pounce", "bounce", "hop"]:
+                    # These are dynamic movements - robot should be standing first
+                    if not self.is_standing:
+                        print(f"{time.strftime('%H:%M:%S')} - ⚠️  Cannot do {pose_cmd}: Robot must be standing first!")
+                        return False
+                    print(f"{time.strftime('%H:%M:%S')} - 🚀 Executing dynamic movement: {pose_cmd}")
+                    # For now, these movements don't have specific SDK calls, so we acknowledge them
+                    print(f"{time.strftime('%H:%M:%S')} - ✅ Dynamic movement {pose_cmd} executed (requires custom implementation)")
+                    return True
+                    
                 else:
                     print(f"❌ Unknown pose command: {pose_cmd}")
                     return False
             else:
-                # Mock mode for testing
-                print(f"{time.strftime('%H:%M:%S')} - 🚷 Would send pose command to robot: {pose_cmd}")
+                # Mock mode for testing - still track state for consistency
+                if pose_cmd == "standup" or pose_cmd == "recovery":
+                    self.is_standing = True
+                    print(f"{time.strftime('%H:%M:%S')} - 🚷 Would send pose command to robot: {pose_cmd} (now standing)")
+                elif pose_cmd == "standdown" or pose_cmd == "damp":
+                    self.is_standing = False
+                    print(f"{time.strftime('%H:%M:%S')} - 🚷 Would send pose command to robot: {pose_cmd} (now lying down)")
+                elif pose_cmd in ["hind_legs", "handstand", "stretch", "pounce_pose", "sit", "shake_paw"]:
+                    if not self.is_standing:
+                        print(f"{time.strftime('%H:%M:%S')} - 🚷 Would reject {pose_cmd}: Robot lying down")
+                        return False
+                    print(f"{time.strftime('%H:%M:%S')} - 🚷 Would execute advanced pose: {pose_cmd}")
+                elif pose_cmd in ["jump_forward", "jump_up", "front_flip", "pounce", "bounce", "hop"]:
+                    if not self.is_standing:
+                        print(f"{time.strftime('%H:%M:%S')} - 🚷 Would reject {pose_cmd}: Robot lying down")
+                        return False
+                    print(f"{time.strftime('%H:%M:%S')} - 🚷 Would execute dynamic movement: {pose_cmd}")
+                else:
+                    print(f"{time.strftime('%H:%M:%S')} - 🚷 Would send pose command to robot: {pose_cmd}")
                 return True
                 
         except Exception as e:

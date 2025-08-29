@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# NOTE: This script now includes full ball retrieval behavior!
+# The robot will push the ball back to its starting position.
 
 import time
 import sys
@@ -21,6 +23,10 @@ class SearchState(Enum):
     STANDING_UP = "standing_up"
     SEARCHING = "searching"
     BALL_FOUND = "ball_found"
+    APPROACHING = "approaching"
+    POSITIONING = "positioning"  # Moving to behind ball
+    ALIGNING = "aligning"        # Aligning to push direction
+    PUSHING = "pushing"          # Pushing ball to start
     STOPPED = "stopped"
 
 class BallSearchRobot:
@@ -32,11 +38,28 @@ class BallSearchRobot:
         self.data_lock = threading.Lock()
         self.has_odom_data = False
         
+        # Starting position (where to return the ball)
+        self.start_x = None
+        self.start_y = None
+        self.start_recorded = False
+        
+        # Target positions for navigation
+        self.target_x = None
+        self.target_y = None
+        self.behind_ball_x = None
+        self.behind_ball_y = None
+        
         # Search state
         self.search_state = SearchState.INITIALIZING
         self.is_running = True
         self.ball_found = False
-        self.ball_position = None
+        self.ball_position = None  # Current/live ball position
+        
+        # Ball position estimation (persists even when not visible)
+        self.estimated_ball_x = None
+        self.estimated_ball_y = None
+        self.last_ball_seen_time = None
+        self.ball_confidence = 0.0  # Confidence in estimated position (0-1)
         
         # Robot control
         self.sport_client = SportClient()
@@ -45,16 +68,18 @@ class BallSearchRobot:
         self.is_standing = False
         
         # Movement parameters
-        self.turn_speed = 1.5  # rad/s - moderate turning speed (back to original)
+        self.turn_speed = 0.8  # rad/s - slower turning speed for better detection
+        self.walk_speed = 0.4  # m/s - slower forward walking speed
+        self.approach_min_distance = 0.5  # meters - stop when this close to ball
         
         # Camera parameters
         self.camera_fov_horizontal = 70.0  # degrees
         self.camera_height = 0.3  # meters above ground
         self.ball_diameter = 0.5  # meters (50cm diameter ball)
         
-        # Ball detection - Green ball HSV color range
-        self.hsv_lower = np.array([35, 50, 50])   # Lower HSV bound for green
-        self.hsv_upper = np.array([85, 255, 255]) # Upper HSV bound for green
+        # Ball detection - Green ball HSV color range (relaxed for better detection)
+        self.hsv_lower = np.array([30, 40, 40])   # More relaxed lower HSV bound for green
+        self.hsv_upper = np.array([90, 255, 255]) # Wider upper HSV bound for green
         
         # YOLO model for object detection
         print("Loading YOLOv8 nano model...")
@@ -76,6 +101,12 @@ class BallSearchRobot:
         # Search parameters
         self.search_start_time = 0
         self.max_search_time = 60.0  # Max 60 seconds of searching
+        
+        # Push monitoring for realignment
+        self.last_realign_time = 0
+        self.realign_interval = 3.0  # Check alignment every 3 seconds
+        self.push_attempts = 0
+        self.max_push_attempts = 10  # Prevent infinite repositioning loops
 
     def setup_plots(self):
         """Setup matplotlib plots"""
@@ -121,6 +152,12 @@ class BallSearchRobot:
                 msg.pose.orientation.x, msg.pose.orientation.y,
                 msg.pose.orientation.z, msg.pose.orientation.w
             )
+            # Record starting position on first update
+            if not self.start_recorded:
+                self.start_x = self.robot_x
+                self.start_y = self.robot_y
+                self.start_recorded = True
+                print(f"📍 Starting position recorded: ({self.start_x:.2f}, {self.start_y:.2f})")
             self.has_odom_data = True
             
     def odom_handler(self, msg: Odometry_):
@@ -132,6 +169,12 @@ class BallSearchRobot:
                 msg.pose.pose.orientation.x, msg.pose.pose.orientation.y,
                 msg.pose.pose.orientation.z, msg.pose.pose.orientation.w
             )
+            # Record starting position on first update
+            if not self.start_recorded:
+                self.start_x = self.robot_x
+                self.start_y = self.robot_y
+                self.start_recorded = True
+                print(f"📍 Starting position recorded: ({self.start_x:.2f}, {self.start_y:.2f})")
             self.has_odom_data = True
 
     def detect_green_ball(self, frame):
@@ -143,7 +186,7 @@ class BallSearchRobot:
         
         # YOLO Detection
         try:
-            results = self.yolo_model(frame, conf=0.15, imgsz=800, verbose=False, classes=[32])  # class 32 = sports ball
+            results = self.yolo_model(frame, conf=0.10, imgsz=800, verbose=False, classes=[32])  # Lower confidence for better detection
             
             for result in results:
                 if result.boxes is not None:
@@ -158,15 +201,26 @@ class BallSearchRobot:
                             green_mask_roi = cv2.inRange(hsv_roi, self.hsv_lower, self.hsv_upper)
                             green_ratio = cv2.countNonZero(green_mask_roi) / roi.size
                             
-                            if green_ratio > 0.2:  # At least 20% green
+                            # Check if this is a large/close object
+                            frame_area = frame.shape[0] * frame.shape[1]
+                            box_area = (x2 - x1) * (y2 - y1)
+                            is_large_yolo = box_area > frame_area * 0.05
+                            
+                            # Relax green requirement for close objects
+                            min_green_ratio_yolo = 0.1 if is_large_yolo else 0.15
+                            
+                            if green_ratio > min_green_ratio_yolo:  # More relaxed for close objects
                                 area = (x2 - x1) * (y2 - y1)
-                                score = confidence * green_ratio * min(area / 10000, 1.0)
+                                # Don't penalize large objects
+                                area_factor = min(area / 10000, 2.0) if is_large_yolo else min(area / 10000, 1.0)
+                                score = confidence * green_ratio * area_factor
                                 ball_candidates.append({
                                     'bbox': (x1, y1, x2, y2),
                                     'confidence': confidence,
                                     'green_ratio': green_ratio,
                                     'score': score,
-                                    'source': 'yolo'
+                                    'source': 'yolo',
+                                    'is_large': is_large_yolo
                                 })
         except Exception as e:
             print(f"⚠️  YOLO detection error: {e}")
@@ -175,8 +229,8 @@ class BallSearchRobot:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         green_mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
         
-        # Apply morphological operations
-        kernel = np.ones((5, 5), np.uint8)
+        # Apply gentler morphological operations to preserve more detections
+        kernel = np.ones((3, 3), np.uint8)  # Smaller kernel (was 5x5)
         green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN, kernel)
         green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel)
         
@@ -184,24 +238,40 @@ class BallSearchRobot:
         
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area > 500:  # Minimum area threshold
+            if area > 200:  # Further relaxed: even smaller minimum area for close detection
                 x, y, w, h = cv2.boundingRect(contour)
                 aspect_ratio = w / h
                 
-                if 0.5 <= aspect_ratio <= 2.0:  # Reasonable aspect ratio for ball
+                # Check if this might be a close-up ball (very large)
+                frame_area = frame.shape[0] * frame.shape[1]
+                is_large_object = area > frame_area * 0.05  # Object takes >5% of frame
+                
+                # More relaxed aspect ratio for large/close objects
+                if is_large_object:
+                    aspect_ok = 0.3 <= aspect_ratio <= 3.0  # Very relaxed for close balls
+                else:
+                    aspect_ok = 0.4 <= aspect_ratio <= 2.5  # Normal range
+                
+                if aspect_ok:
                     roi = frame[y:y+h, x:x+w]
                     if roi.size > 0:
                         hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
                         green_mask_roi = cv2.inRange(hsv_roi, self.hsv_lower, self.hsv_upper)
                         green_ratio = cv2.countNonZero(green_mask_roi) / roi.size
                         
-                        if green_ratio > 0.4:  # At least 40% green for HSV-only detection
-                            score = green_ratio * min(area / 10000, 1.0) * 0.5  # Lower weight than YOLO
+                        # More relaxed green ratio for large/close objects
+                        min_green_ratio = 0.2 if is_large_object else 0.3
+                        
+                        if green_ratio > min_green_ratio:
+                            # Don't penalize large objects in scoring
+                            area_score = min(area / 10000, 2.0) if is_large_object else min(area / 10000, 1.0)
+                            score = green_ratio * area_score * 0.5
                             ball_candidates.append({
                                 'bbox': (x, y, x+w, y+h),
                                 'green_ratio': green_ratio,
                                 'score': score,
-                                'source': 'color'
+                                'source': 'color',
+                                'is_large': is_large_object
                             })
         
         # Select best candidate
@@ -288,6 +358,26 @@ class BallSearchRobot:
             ret = self.sport_client.Move(0.0, 0.0, self.turn_speed)
             if ret != 0:
                 print(f"⚠️  Turn command failed: {ret}")
+            # Debug: confirm command was sent
+            # print(f"DEBUG: Sent Move(0, 0, {self.turn_speed})")
+    
+    def move_forward(self):
+        """Move robot forward toward the ball"""
+        if self.is_standing:
+            ret = self.sport_client.Move(self.walk_speed, 0.0, 0.0)
+            if ret != 0:
+                print(f"⚠️  Forward movement failed: {ret}")
+    
+    def turn_toward_ball(self, angle_to_ball):
+        """Turn robot toward ball based on angle"""
+        if self.is_standing:
+            # Turn speed proportional to angle (slower when close to correct heading)
+            turn_rate = min(self.turn_speed, abs(angle_to_ball) * 2.0)
+            if angle_to_ball > 0:
+                turn_rate = -turn_rate  # Turn right if ball is to the right
+            ret = self.sport_client.Move(0.0, 0.0, turn_rate)
+            if ret != 0:
+                print(f"⚠️  Turn toward ball failed: {ret}")
 
     def emergency_stop(self):
         """Emergency stop and damp robot"""
@@ -295,6 +385,92 @@ class BallSearchRobot:
         self.sport_client.Damp()
         self.is_running = False
         print("🛑 Emergency stop activated")
+    
+    def update_ball_estimation(self, world_x, world_y):
+        """Update estimated ball position with new detection"""
+        current_time = time.time()
+        
+        # If this is first detection or significant movement
+        if self.estimated_ball_x is None or self.estimated_ball_y is None:
+            self.estimated_ball_x = world_x
+            self.estimated_ball_y = world_y
+            self.ball_confidence = 1.0
+        else:
+            # Smooth update using weighted average
+            # More weight to new measurement if high confidence
+            alpha = 0.7  # Weight for new measurement
+            self.estimated_ball_x = alpha * world_x + (1 - alpha) * self.estimated_ball_x
+            self.estimated_ball_y = alpha * world_y + (1 - alpha) * self.estimated_ball_y
+            self.ball_confidence = min(1.0, self.ball_confidence + 0.2)  # Increase confidence
+        
+        self.last_ball_seen_time = current_time
+        
+    def decay_ball_confidence(self):
+        """Decay confidence in ball position estimate over time"""
+        if self.last_ball_seen_time is None:
+            return
+            
+        current_time = time.time()
+        time_since_seen = current_time - self.last_ball_seen_time
+        
+        # Decay confidence based on time (lose 10% confidence per second)
+        decay_rate = 0.1
+        self.ball_confidence = max(0.0, self.ball_confidence - decay_rate * time_since_seen * 0.02)  # 0.02 for 50Hz update
+    
+    def calculate_behind_ball_position(self, ball_x, ball_y):
+        """Calculate position behind ball (opposite from starting position)"""
+        if self.start_x is None or self.start_y is None:
+            return None, None
+            
+        # Vector from ball to start
+        to_start_x = self.start_x - ball_x
+        to_start_y = self.start_y - ball_y
+        distance_to_start = math.sqrt(to_start_x**2 + to_start_y**2)
+        
+        if distance_to_start < 0.01:  # Ball is already at start
+            return ball_x, ball_y
+            
+        # Normalize vector
+        norm_x = to_start_x / distance_to_start
+        norm_y = to_start_y / distance_to_start
+        
+        # Position 0.7m behind ball (opposite from start)
+        behind_x = ball_x - norm_x * 0.7
+        behind_y = ball_y - norm_y * 0.7
+        
+        return behind_x, behind_y
+    
+    def calculate_angle_to_position(self, target_x, target_y):
+        """Calculate angle from robot to target position"""
+        with self.data_lock:
+            dx = target_x - self.robot_x
+            dy = target_y - self.robot_y
+            target_angle = math.atan2(dy, dx)
+            
+            # Calculate angle difference
+            angle_diff = target_angle - self.robot_yaw
+            
+            # Normalize to [-pi, pi]
+            while angle_diff > math.pi:
+                angle_diff -= 2 * math.pi
+            while angle_diff < -math.pi:
+                angle_diff += 2 * math.pi
+                
+            return angle_diff
+    
+    def move_backward(self):
+        """Move robot backward"""
+        if self.is_standing:
+            ret = self.sport_client.Move(-self.walk_speed * 0.5, 0.0, 0.0)  # Slower backward
+            if ret != 0:
+                print(f"⚠️  Backward movement failed: {ret}")
+    
+    def strafe_right(self):
+        """Move robot sideways to the right"""
+        if self.is_standing:
+            ret = self.sport_client.Move(0.0, -self.walk_speed * 0.5, 0.0)
+            if ret != 0:
+                print(f"⚠️  Strafe right failed: {ret}")
 
     def update_visualization(self, frame, ball_detection):
         """Update both camera view and map visualization"""
@@ -308,8 +484,16 @@ class BallSearchRobot:
         # Show search state in camera title
         if self.search_state == SearchState.SEARCHING:
             camera_title = 'Camera View - Searching for Ball...'
-        elif self.search_state == SearchState.BALL_FOUND:
-            camera_title = 'Camera View - BALL FOUND!'
+        elif self.search_state == SearchState.APPROACHING:
+            camera_title = 'Camera View - APPROACHING BALL!'
+        elif self.search_state == SearchState.POSITIONING:
+            camera_title = 'Camera View - Moving Behind Ball'
+        elif self.search_state == SearchState.ALIGNING:
+            camera_title = 'Camera View - Aligning for Push'
+        elif self.search_state == SearchState.PUSHING:
+            camera_title = 'Camera View - PUSHING BALL!'
+        elif self.search_state == SearchState.STOPPED:
+            camera_title = 'Camera View - MISSION COMPLETE!'
         else:
             camera_title = 'Camera View - Ball Detection'
         self.ax_camera.set_title(camera_title)
@@ -336,26 +520,88 @@ class BallSearchRobot:
         # Show search status in map title
         if self.search_state == SearchState.SEARCHING:
             elapsed = time.time() - self.search_start_time
-            map_title = f'Ball Search - Turning Left ({elapsed:.1f}s)'
-        elif self.search_state == SearchState.BALL_FOUND:
-            map_title = 'Ball Search - BALL FOUND!'
+            map_title = f'Ball Retrieval - Searching ({elapsed:.1f}s)'
+        elif self.search_state == SearchState.APPROACHING:
+            if self.ball_position:
+                distance = math.sqrt((self.ball_position[0] - robot_x)**2 + (self.ball_position[1] - robot_y)**2)
+                map_title = f'Ball Retrieval - Approaching Ball ({distance:.2f}m)'
+            else:
+                map_title = 'Ball Retrieval - APPROACHING'
+        elif self.search_state == SearchState.POSITIONING:
+            if self.behind_ball_x is not None:
+                dist = math.sqrt((self.behind_ball_x - robot_x)**2 + (self.behind_ball_y - robot_y)**2)
+                map_title = f'Ball Retrieval - Moving Behind Ball ({dist:.2f}m)'
+            else:
+                map_title = 'Ball Retrieval - POSITIONING'
+        elif self.search_state == SearchState.ALIGNING:
+            map_title = 'Ball Retrieval - Aligning for Push'
+        elif self.search_state == SearchState.PUSHING:
+            if self.ball_position and self.start_x is not None:
+                ball_x, ball_y = self.ball_position
+                dist_to_goal = math.sqrt((ball_x - self.start_x)**2 + (ball_y - self.start_y)**2)
+                map_title = f'Ball Retrieval - PUSHING! (Goal: {dist_to_goal:.2f}m)'
+            else:
+                map_title = 'Ball Retrieval - PUSHING'
+        elif self.search_state == SearchState.STOPPED:
+            map_title = '🎉 MISSION COMPLETE!'
         else:
-            map_title = 'Ball Search - Robot Position'
+            map_title = 'Ball Retrieval System'
         self.ax_map.set_title(map_title)
         
-        # Draw ball position if found
+        # Draw starting position (goal)
+        if self.start_x is not None and self.start_y is not None:
+            # Goal marker
+            goal_circle = plt.Circle((self.start_x, self.start_y), 0.2, 
+                                    color='gold', alpha=0.5, linestyle='--', 
+                                    linewidth=2, fill=False, label='Start/Goal')
+            self.ax_map.add_patch(goal_circle)
+            self.ax_map.text(self.start_x, self.start_y - 0.3, 'GOAL', 
+                           ha='center', va='top', fontweight='bold', color='goldenrod', fontsize=8)
+        
+        # Draw target position behind ball
+        if self.behind_ball_x is not None and self.behind_ball_y is not None and self.search_state == SearchState.POSITIONING:
+            target_marker = plt.Circle((self.behind_ball_x, self.behind_ball_y), 0.15,
+                                      color='red', alpha=0.3, label='Target Position')
+            self.ax_map.add_patch(target_marker)
+            self.ax_map.plot(self.behind_ball_x, self.behind_ball_y, 'rx', markersize=10)
+        
+        # Draw estimated ball position (if we have one)
+        if self.estimated_ball_x is not None and self.estimated_ball_y is not None and self.ball_confidence > 0.1:
+            # Draw estimated position with transparency based on confidence
+            est_circle = plt.Circle((self.estimated_ball_x, self.estimated_ball_y), 
+                                   self.ball_diameter/2, 
+                                   color='lightgreen', alpha=self.ball_confidence * 0.3,
+                                   linestyle='--', linewidth=2, fill=False,
+                                   label=f'Est. Ball (conf={self.ball_confidence:.1f})')
+            self.ax_map.add_patch(est_circle)
+            
+            # Show "EST" text only if not currently detected
+            if not self.ball_found or self.ball_position is None:
+                self.ax_map.text(self.estimated_ball_x, self.estimated_ball_y - 0.35, 
+                               f'EST\n{self.ball_confidence:.1f}', 
+                               ha='center', va='top', fontweight='bold', 
+                               color='gray', fontsize=7, alpha=0.7)
+        
+        # Draw current ball position if detected
         if self.ball_found and self.ball_position:
             ball_x, ball_y = self.ball_position
             circle = plt.Circle((ball_x, ball_y), self.ball_diameter/2, 
-                              color='green', alpha=0.7, label='Ball')
+                              color='green', alpha=0.7, label='Ball (Live)')
             self.ax_map.add_patch(circle)
             self.ax_map.text(ball_x, ball_y + 0.3, 'BALL', ha='center', va='bottom', 
                            fontweight='bold', color='darkgreen', fontsize=9)
             
-            # Show distance to ball
-            distance = math.sqrt((ball_x - robot_x)**2 + (ball_y - robot_y)**2)
-            self.ax_map.text(robot_x, robot_y - 0.5, f'Distance: {distance:.1f}m', 
-                           ha='center', va='top', fontweight='bold', color='blue')
+            # Draw line from ball to goal during pushing
+            if self.search_state in [SearchState.POSITIONING, SearchState.ALIGNING, SearchState.PUSHING]:
+                if self.start_x is not None:
+                    self.ax_map.plot([ball_x, self.start_x], [ball_y, self.start_y], 
+                                   'g--', alpha=0.3, linewidth=1)
+            
+            # Show distance to ball only during approach
+            if self.search_state == SearchState.APPROACHING:
+                distance = math.sqrt((ball_x - robot_x)**2 + (ball_y - robot_y)**2)
+                self.ax_map.text(robot_x, robot_y - 0.5, f'Distance: {distance:.1f}m', 
+                               ha='center', va='top', fontweight='bold', color='blue')
         
         # Set axis limits centered on robot
         axis_range = 3.0  # meters in each direction
@@ -390,7 +636,8 @@ class BallSearchRobot:
             print("❌ Failed to stand up, aborting search")
             return
             
-        time.sleep(2)  # Give robot time to stabilize
+        print("⏳ Waiting for robot to stabilize...")
+        time.sleep(4)  # Give robot plenty of time to stabilize
         
         # Start searching
         self.search_state = SearchState.SEARCHING
@@ -402,11 +649,16 @@ class BallSearchRobot:
         self.update_visualization(None, None)
         
         try:
-            while self.is_running and not self.ball_found and plt.get_fignums():
+            while self.is_running and self.search_state != SearchState.STOPPED and plt.get_fignums():
                 # Check if we've been searching too long
                 if time.time() - self.search_start_time > self.max_search_time:
                     print("⏰ Search timeout - no ball found")
                     break
+                
+                # Initialize ball detection for this iteration
+                ball_detection = None
+                annotated_frame = None
+                frame = None
                 
                 # Get camera frame
                 code, data = self.video_client.GetImageSample()
@@ -423,7 +675,7 @@ class BallSearchRobot:
                         # Update visualization
                         self.update_visualization(annotated_frame, ball_detection)
                         
-                        # If ball detected, stop searching
+                        # If ball detected, transition to approaching
                         if ball_detection:
                             world_x, world_y, distance = self.pixel_to_world_coordinates(
                                 ball_detection['center'][0], 
@@ -434,34 +686,276 @@ class BallSearchRobot:
                             
                             self.ball_position = (world_x, world_y)
                             self.ball_found = True
-                            self.search_state = SearchState.BALL_FOUND
                             
-                            print(f"🎯 BALL FOUND!")
-                            print(f"   Position: ({world_x:.2f}, {world_y:.2f}) meters")
-                            print(f"   Distance: {distance:.2f} meters")
-                            print(f"   Detection: {ball_detection['source'].upper()}")
+                            # Update ball position estimation
+                            self.update_ball_estimation(world_x, world_y)
                             
-                            # Stop turning
-                            self.stop_movement()
-                            break
+                            if self.search_state == SearchState.SEARCHING:
+                                print(f"🎯 BALL FOUND!")
+                                print(f"   Position: ({world_x:.2f}, {world_y:.2f}) meters")
+                                print(f"   Estimated: ({self.estimated_ball_x:.2f}, {self.estimated_ball_y:.2f}) conf={self.ball_confidence:.2f}")
+                                print(f"   Distance: {distance:.2f} meters")
+                                print(f"   Detection: {ball_detection['source'].upper()}")
+                                self.search_state = SearchState.APPROACHING
+                                self.stop_movement()  # Stop turning before approaching
+                            
+                            # Start calculating behind position early (at 1.5m) for smooth approach
+                            if self.search_state == SearchState.APPROACHING:
+                                if distance <= 1.5 and self.behind_ball_x is None:
+                                    # Early calculation of behind position for smooth curved approach
+                                    print(f"📐 Pre-calculating behind position at {distance:.2f}m...")
+                                    ball_x_for_calc = self.estimated_ball_x if self.estimated_ball_x is not None else world_x
+                                    ball_y_for_calc = self.estimated_ball_y if self.estimated_ball_y is not None else world_y
+                                    self.behind_ball_x, self.behind_ball_y = self.calculate_behind_ball_position(ball_x_for_calc, ball_y_for_calc)
+                                    if self.behind_ball_x is not None:
+                                        print(f"📍 Target behind position: ({self.behind_ball_x:.2f}, {self.behind_ball_y:.2f})")
+                                
+                                # Transition to positioning when close enough
+                                if distance <= self.approach_min_distance:
+                                    print(f"✅ Close to ball! Distance: {distance:.2f}m")
+                                    
+                                    # Recalculate for final positioning if needed
+                                    if self.behind_ball_x is None:
+                                        ball_x_for_calc = self.estimated_ball_x if self.estimated_ball_x is not None else world_x
+                                        ball_y_for_calc = self.estimated_ball_y if self.estimated_ball_y is not None else world_y
+                                        self.behind_ball_x, self.behind_ball_y = self.calculate_behind_ball_position(ball_x_for_calc, ball_y_for_calc)
+                                    
+                                    if self.behind_ball_x is not None:
+                                        print(f"🎯 Moving to final position behind ball")
+                                        self.search_state = SearchState.POSITIONING
+                                        self.stop_movement()
+                                    else:
+                                        print("⚠️ Could not calculate behind position")
+                                        self.search_state = SearchState.STOPPED
+                                        break
                 
                 else:
                     print(f"⚠️  Camera error: {code}")
                     # Still update visualization without camera data
                     self.update_visualization(None, None)
                 
-                # Send turn command continuously for 0.5 seconds, then pause
+                # Update ball confidence decay if not currently seeing ball
+                if not ball_detection:
+                    self.decay_ball_confidence()
+                
+                # Handle different states
                 current_time = time.time()
+                
                 if self.search_state == SearchState.SEARCHING:
-                    if current_time - self.last_turn_time < 0.5:
-                        # During the 0.5 second turn duration, keep sending turn commands
+                    # Search pattern: turn for 0.7s, pause for 1.5s (slower rotation, more deliberate)
+                    if current_time - self.last_turn_time < 0.7:
+                        # During the 0.7 second turn duration, keep sending turn commands rapidly
                         self.turn_left()  # Same as pressing 'q' in robot_controller_simple.py
-                    elif current_time - self.last_turn_time >= 1.0:
-                        # After 1 second total (0.5s turning + 0.5s pause), start new turn
+                    elif current_time - self.last_turn_time >= 2.2:
+                        # After 2.2 seconds total (0.7s turning + 1.5s pause), start new turn
                         self.last_turn_time = current_time
                         print("↺ Turning left to search...")
+                        self.stop_movement()  # Explicitly stop during pause
+                    elif current_time - self.last_turn_time >= 0.7:
+                        # During pause period (0.7-2.2s), ensure we stopped
+                        if current_time - self.last_turn_time < 0.75:  # Only stop once
+                            self.stop_movement()
+                            
+                elif self.search_state == SearchState.APPROACHING:
+                    # Approach the ball with curved path to get behind it
+                    if ball_detection and frame is not None:
+                        # Get current distance to ball
+                        world_x, world_y, distance = self.pixel_to_world_coordinates(
+                            ball_detection['center'][0], 
+                            ball_detection['center'][1],
+                            frame.shape,
+                            ball_detection['radius']
+                        )
+                        
+                        # Calculate angle to ball from center of camera
+                        frame_width = frame.shape[1]
+                        ball_center_x = ball_detection['center'][0]
+                        normalized_x = (ball_center_x - frame_width/2) / (frame_width/2)
+                        angle_to_ball = normalized_x * (self.camera_fov_horizontal/2) * (math.pi/180)
+                        
+                        # Check if we should curve toward behind position (between 0.5m and 1.5m)
+                        if 0.5 < distance <= 1.5 and self.behind_ball_x is not None:
+                            # Calculate blended target: move toward a point between ball and behind position
+                            # As we get closer, weight shifts more toward behind position
+                            blend_factor = (distance - 0.5) / 1.0  # 1.0 at 1.5m, 0.0 at 0.5m
+                            
+                            # Blend target position
+                            target_x = world_x * blend_factor + self.behind_ball_x * (1 - blend_factor)
+                            target_y = world_y * blend_factor + self.behind_ball_y * (1 - blend_factor)
+                            
+                            # Calculate angle to blended target
+                            angle_to_target = self.calculate_angle_to_position(target_x, target_y)
+                            
+                            # Move with curved path
+                            if abs(angle_to_target) > 0.15:
+                                # Turn toward blended target
+                                turn_rate = min(self.turn_speed * 0.7, abs(angle_to_target) * 1.5)
+                                if angle_to_target < 0:
+                                    turn_rate = -turn_rate
+                                # Move forward while turning for curved path
+                                ret = self.sport_client.Move(self.walk_speed * 0.5, 0.0, turn_rate)
+                                print(f"🌀 Curving behind ball (dist: {distance:.2f}m, blend: {blend_factor:.1f})", end='\r')
+                            else:
+                                # Mostly aligned, move forward
+                                self.move_forward()
+                                print(f"🚶 Approaching behind position (dist: {distance:.2f}m)", end='\r')
+                        
+                        # Standard approach when far or very close
+                        else:
+                            # If ball is centered, move forward; otherwise turn toward it
+                            if abs(angle_to_ball) < 0.1:  # Ball is roughly centered (within ~6 degrees)
+                                self.move_forward()
+                                print(f"🚶 Moving forward to ball (dist: {distance:.2f}m)", end='\r')
+                            else:
+                                self.turn_toward_ball(angle_to_ball)
+                                print(f"🔄 Adjusting heading (angle: {math.degrees(angle_to_ball):.1f}°)", end='\r')
+                    else:
+                        # Lost sight of ball, go back to searching
+                        print("\n⚠️ Lost sight of ball! Resuming search...")
+                        self.search_state = SearchState.SEARCHING
+                        self.last_turn_time = current_time
+                        self.ball_found = False  # Reset so we can find it again
+                        self.behind_ball_x = None  # Reset behind position
+                        self.behind_ball_y = None
+                        
+                elif self.search_state == SearchState.POSITIONING:
+                    # Move to position behind ball
+                    if self.behind_ball_x is not None and self.behind_ball_y is not None:
+                        with self.data_lock:
+                            dist_to_target = math.sqrt((self.behind_ball_x - self.robot_x)**2 + 
+                                                      (self.behind_ball_y - self.robot_y)**2)
+                        
+                        if dist_to_target > 0.3:  # Not at target yet
+                            # Calculate angle to behind position
+                            angle_to_target = self.calculate_angle_to_position(self.behind_ball_x, self.behind_ball_y)
+                            
+                            # Turn toward target first
+                            if abs(angle_to_target) > 0.2:  # Need to turn
+                                turn_rate = min(self.turn_speed, abs(angle_to_target) * 2.0)
+                                if angle_to_target < 0:
+                                    turn_rate = -turn_rate
+                                ret = self.sport_client.Move(0.0, 0.0, turn_rate)
+                                print(f"🔄 Turning to behind position (angle: {math.degrees(angle_to_target):.1f}°)", end='\r')
+                            else:
+                                # Move forward toward target
+                                self.move_forward()
+                                print(f"🚶 Moving to behind position (distance: {dist_to_target:.2f}m)", end='\r')
+                        else:
+                            # Reached behind position, now align for pushing
+                            print(f"\n✅ Reached position behind ball")
+                            self.search_state = SearchState.ALIGNING
+                            self.stop_movement()
+                            # Note: If this was a realignment, push_attempts has already been incremented
+                            
+                elif self.search_state == SearchState.ALIGNING:
+                    # Align to face the starting position
+                    if self.start_x is not None and self.start_y is not None:
+                        angle_to_start = self.calculate_angle_to_position(self.start_x, self.start_y)
+                        
+                        if abs(angle_to_start) > 0.1:  # Need to align
+                            turn_rate = min(self.turn_speed * 0.5, abs(angle_to_start))  # Slower, precise turn
+                            if angle_to_start < 0:
+                                turn_rate = -turn_rate
+                            ret = self.sport_client.Move(0.0, 0.0, turn_rate)
+                            print(f"🎯 Aligning to push direction (angle: {math.degrees(angle_to_start):.1f}°)", end='\r')
+                        else:
+                            # Aligned, start pushing
+                            print(f"\n✅ Aligned! Starting to push ball to start position")
+                            self.search_state = SearchState.PUSHING
+                            self.last_realign_time = current_time  # Reset realignment timer
+                            
+                elif self.search_state == SearchState.PUSHING:
+                    # Push the ball toward starting position
+                    if ball_detection and frame is not None:
+                        # Keep ball centered while pushing
+                        frame_width = frame.shape[1]
+                        ball_center_x = ball_detection['center'][0]
+                        normalized_x = (ball_center_x - frame_width/2) / (frame_width/2)
+                        angle_to_ball = normalized_x * (self.camera_fov_horizontal/2) * (math.pi/180)
+                        
+                        # Check distance to start
+                        if self.ball_position and self.start_x is not None:
+                            ball_x, ball_y = self.ball_position
+                            dist_to_start = math.sqrt((ball_x - self.start_x)**2 + (ball_y - self.start_y)**2)
+                            
+                            if dist_to_start < 0.3:  # Ball reached start position
+                                print(f"\n🎉 SUCCESS! Ball pushed to starting position!")
+                                self.search_state = SearchState.STOPPED
+                                self.stop_movement()
+                                break
+                            
+                            # Check if it's time to realign (every 3 seconds)
+                            if current_time - self.last_realign_time > self.realign_interval:
+                                # Update ball estimation for smoother tracking
+                                self.update_ball_estimation(ball_x, ball_y)
+                                
+                                # Recalculate ideal position behind ball (use estimated for stability)
+                                est_ball_x = self.estimated_ball_x if self.estimated_ball_x is not None else ball_x
+                                est_ball_y = self.estimated_ball_y if self.estimated_ball_y is not None else ball_y
+                                new_behind_x, new_behind_y = self.calculate_behind_ball_position(est_ball_x, est_ball_y)
+                                
+                                if new_behind_x is not None:
+                                    # Check if robot has drifted from ideal position
+                                    with self.data_lock:
+                                        dist_from_ideal = math.sqrt((self.robot_x - new_behind_x)**2 + 
+                                                                   (self.robot_y - new_behind_y)**2)
+                                    
+                                    # Also check angle to goal
+                                    angle_to_goal = self.calculate_angle_to_position(self.start_x, self.start_y)
+                                    
+                                    # Check if ball is significantly off course
+                                    # Calculate angle between ball-to-goal vector and robot-to-ball vector
+                                    ideal_vec_x = self.start_x - ball_x
+                                    ideal_vec_y = self.start_y - ball_y
+                                    actual_vec_x = ball_x - self.robot_x
+                                    actual_vec_y = ball_y - self.robot_y
+                                    
+                                    # Normalize vectors and compute angle
+                                    ideal_mag = math.sqrt(ideal_vec_x**2 + ideal_vec_y**2)
+                                    actual_mag = math.sqrt(actual_vec_x**2 + actual_vec_y**2)
+                                    
+                                    angle_deviation = 0
+                                    if ideal_mag > 0.01 and actual_mag > 0.01:
+                                        dot_product = ideal_vec_x * actual_vec_x + ideal_vec_y * actual_vec_y
+                                        cos_angle = dot_product / (ideal_mag * actual_mag)
+                                        cos_angle = max(-1.0, min(1.0, cos_angle))  # Clamp to [-1, 1]
+                                        angle_deviation = math.acos(cos_angle)
+                                    
+                                    # Decide if realignment is needed
+                                    if dist_from_ideal > 0.5 or abs(angle_to_goal) > 0.3 or angle_deviation > math.radians(30):
+                                        # Need to reposition
+                                        print(f"\n🔄 Realigning behind ball (drift: {dist_from_ideal:.2f}m, angle: {math.degrees(angle_deviation):.1f}°)")
+                                        self.behind_ball_x = new_behind_x
+                                        self.behind_ball_y = new_behind_y
+                                        self.search_state = SearchState.POSITIONING
+                                        self.push_attempts += 1
+                                        
+                                        if self.push_attempts > self.max_push_attempts:
+                                            print("\n⚠️ Too many realignment attempts, stopping")
+                                            self.search_state = SearchState.STOPPED
+                                            break
+                                    else:
+                                        # Good alignment, continue pushing
+                                        self.last_realign_time = current_time
+                            
+                            # Normal pushing behavior
+                            if self.search_state == SearchState.PUSHING:  # Still in pushing state
+                                if abs(angle_to_ball) < 0.15:  # Ball is centered
+                                    ret = self.sport_client.Move(self.walk_speed * 0.25, 0.0, 0.0)  # Very slow push (0.1 m/s)
+                                    print(f"⚽ Pushing ball (distance to goal: {dist_to_start:.2f}m, attempts: {self.push_attempts})", end='\r')
+                                else:
+                                    # Adjust heading to keep ball centered
+                                    turn_rate = angle_to_ball * -1.5  # Slower turn adjustment
+                                    ret = self.sport_client.Move(self.walk_speed * 0.15, 0.0, turn_rate)  # Even slower when adjusting
+                                    print(f"⚽ Adjusting push angle", end='\r')
+                    else:
+                        # Lost ball while pushing
+                        print("\n⚠️ Lost ball while pushing! Searching...")
+                        self.search_state = SearchState.SEARCHING
+                        self.last_turn_time = current_time
+                        self.ball_found = False
                     
-                time.sleep(0.5) 
+                time.sleep(0.02)  # 50Hz - MUST be fast to send commands continuously! 
                 
         except KeyboardInterrupt:
             print("\n⏹️  Search interrupted by user")
@@ -481,11 +975,11 @@ class BallSearchRobot:
     def run(self):
         """Main execution method"""
         try:
-            print("🎮 Ball Search Robot")
+            print("🎮 Ball Retrieval Mission")
             print("=" * 50)
-            print("This robot will turn in place until it finds a green ball.")
+            print("Robot will find the green ball and push it back to starting position.")
             print("")
-            print("Press ENTER to start search, or Ctrl+C to abort")
+            print("Press ENTER to start mission, or Ctrl+C to abort")
             
             # Start the search
             self.search_for_ball()
@@ -504,22 +998,30 @@ class BallSearchRobot:
             print("🔌 Ball search robot disconnected")
 
 def main():
-    print("🎯 Go2 Ball Search Robot")
+    print("🎯 Go2 Ball Retrieval System")
     print("=" * 50)
-    print("Autonomous ball detection with robot rotation")
+    print("Autonomous ball retrieval - Push ball back to starting position")
     print("")
     print("Setup Instructions:")
     print("  1. Connect to Go2 robot via ethernet")
     print("  2. Set PC IP to 192.168.123.51/24") 
     print("  3. Robot should be at 192.168.123.18")
-    print("  4. Place a large green ball somewhere visible")
+    print("  4. Place a large green ball somewhere in the area")
     print("  5. Usage: python3 ball_search.py [network_interface]")
     print("")
-    print("Behavior:")
-    print("  - Robot will stand up automatically")
-    print("  - Robot will turn right until ball is detected")
-    print("  - Robot will stop when ball is found")
-    print("  - Live camera view shows detection status")
+    print("Mission Sequence:")
+    print("  1. Record starting position as goal")
+    print("  2. Search for green ball by turning")
+    print("  3. Approach ball when found")
+    print("  4. Navigate to position behind ball")
+    print("  5. Align toward starting position")
+    print("  6. Push ball back to start")
+    print("")
+    print("Visualization:")
+    print("  - Gold circle: Starting position (goal)")
+    print("  - Green circle: Ball location")
+    print("  - Red X: Target position behind ball")
+    print("  - Blue arrow: Robot position and heading")
     print("")
     
     print("⚠️  WARNING: Ensure clear space around robot!")

@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import threading
 from collections import deque
+from ultralytics import YOLO
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
 from unitree_sdk2py.go2.video.video_client import VideoClient
 from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
@@ -34,8 +35,12 @@ class BallLocalizer:
         self.ball_detected = False  # Whether ball is currently visible
         
         # Green ball HSV color range
-        self.hsv_lower = np.array([40, 50, 50])   # Lower HSV bound for green
-        self.hsv_upper = np.array([80, 255, 255]) # Upper HSV bound for green
+        self.hsv_lower = np.array([35, 50, 50])   # Lower HSV bound for green (updated from ball_detection.py)
+        self.hsv_upper = np.array([85, 255, 255]) # Upper HSV bound for green (updated from ball_detection.py)
+        
+        # YOLO model for object detection
+        print("Loading YOLOv8 nano model...")
+        self.yolo_model = YOLO('yolov8n.pt')
         
         # Visualization
         plt.ion()
@@ -108,51 +113,102 @@ class BallLocalizer:
             self.has_odom_data = True
             
     def detect_green_ball(self, frame):
-        """Detect green ball in camera frame"""
+        """Detect green ball using YOLO + HSV dual detection system"""
         if frame is None:
             return None, None
             
-        # Convert BGR to HSV
+        ball_candidates = []
+        
+        # YOLO Detection
+        try:
+            results = self.yolo_model(frame, conf=0.15, imgsz=800, verbose=False, classes=[32])  # class 32 = sports ball
+            
+            for result in results:
+                if result.boxes is not None:
+                    for box in result.boxes:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        confidence = float(box.conf[0])
+                        
+                        # Check if detected object is green
+                        roi = frame[y1:y2, x1:x2]
+                        if roi.size > 0:
+                            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                            green_mask_roi = cv2.inRange(hsv_roi, self.hsv_lower, self.hsv_upper)
+                            green_ratio = cv2.countNonZero(green_mask_roi) / roi.size
+                            
+                            if green_ratio > 0.2:  # At least 20% green
+                                area = (x2 - x1) * (y2 - y1)
+                                score = confidence * green_ratio * min(area / 10000, 1.0)
+                                ball_candidates.append({
+                                    'bbox': (x1, y1, x2, y2),
+                                    'confidence': confidence,
+                                    'green_ratio': green_ratio,
+                                    'score': score,
+                                    'source': 'yolo'
+                                })
+        except Exception as e:
+            print(f"⚠️  YOLO detection error: {e}")
+        
+        # HSV Color Detection (fallback/additional detection)
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        green_mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
         
-        # Create mask for green color
-        mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
-        
-        # Apply morphological operations to clean up mask
+        # Apply morphological operations
         kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN, kernel)
+        green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel)
         
-        # Find contours
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        if not contours:
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > 500:  # Minimum area threshold
+                x, y, w, h = cv2.boundingRect(contour)
+                aspect_ratio = w / h
+                
+                if 0.5 <= aspect_ratio <= 2.0:  # Reasonable aspect ratio for ball
+                    roi = frame[y:y+h, x:x+w]
+                    if roi.size > 0:
+                        hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                        green_mask_roi = cv2.inRange(hsv_roi, self.hsv_lower, self.hsv_upper)
+                        green_ratio = cv2.countNonZero(green_mask_roi) / roi.size
+                        
+                        if green_ratio > 0.4:  # At least 40% green for HSV-only detection
+                            score = green_ratio * min(area / 10000, 1.0) * 0.5  # Lower weight than YOLO
+                            ball_candidates.append({
+                                'bbox': (x, y, x+w, y+h),
+                                'green_ratio': green_ratio,
+                                'score': score,
+                                'source': 'color'
+                            })
+        
+        # Select best candidate
+        if not ball_candidates:
             return frame, None
             
-        # Find largest contour (assuming it's the ball)
-        largest_contour = max(contours, key=cv2.contourArea)
+        best_ball = max(ball_candidates, key=lambda x: x['score'])
+        x1, y1, x2, y2 = best_ball['bbox']
         
-        # Filter by area (ball should be reasonably large) - REVERTED TO ORIGINAL
-        area = cv2.contourArea(largest_contour)
-        if area < 100:  # Back to original minimum area threshold
-            return frame, None
-            
-        # Get bounding circle
-        (x, y), radius = cv2.minEnclosingCircle(largest_contour)
-        center = (int(x), int(y))
-        radius = int(radius)
+        # Calculate center and radius for compatibility with existing code
+        center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
+        center = (center_x, center_y)
         
-        # Only consider if radius is reasonable - REVERTED TO ORIGINAL
-        if radius < 10:  # Back to original minimum radius
-            return frame, None
-            
+        # Estimate radius from bounding box
+        radius = min(x2 - x1, y2 - y1) // 2
+        
         # Draw detection on frame
-        cv2.circle(frame, center, radius, (0, 255, 255), 2)  # Yellow circle
-        cv2.circle(frame, center, 2, (0, 0, 255), -1)        # Red center dot
-        cv2.putText(frame, f'Ball: r={radius}', (center[0]-50, center[1]-radius-10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        color = (0, 255, 0) if best_ball['source'] == 'yolo' else (0, 255, 255)  # Green for YOLO, Yellow for HSV
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+        cv2.circle(frame, center, 5, (255, 0, 255), -1)  # Magenta center dot
         
-        return frame, {'center': center, 'radius': radius}
+        # Add label based on detection method
+        if best_ball['source'] == 'yolo':
+            label = f"Ball (YOLO): {best_ball['confidence']:.2f}"
+        else:
+            label = f"Ball (HSV): {best_ball['green_ratio']:.1%}"
+        cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        
+        return frame, {'center': center, 'radius': radius, 'source': best_ball['source'], 'score': best_ball['score']}
         
     def pixel_to_world_coordinates(self, pixel_x, pixel_y, frame_shape, radius_pixels):
         """Convert pixel coordinates to world coordinates using ball size"""

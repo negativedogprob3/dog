@@ -1,0 +1,1 @@
+Add things here that future versions of me should know about this codebase.

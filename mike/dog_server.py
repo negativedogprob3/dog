@@ -33,6 +33,9 @@ from typing import Dict, List, Optional, Any
 import logging
 from dataclasses import dataclass, asdict
 import argparse
+import socket
+import subprocess
+import platform
 
 # Try to import Unitree SDK (mock if not available)
 try:
@@ -43,6 +46,95 @@ try:
     SDK_AVAILABLE = False  # Set to False for now since SDK may not be installed
 except ImportError:
     SDK_AVAILABLE = False
+
+def get_local_ip() -> str:
+    """Get the local IP address that can be reached by other computers"""
+    try:
+        # Connect to a remote address to determine local IP
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except:
+        return "127.0.0.1"
+
+def detect_network_interfaces() -> List[str]:
+    """Detect available network interfaces"""
+    interfaces = []
+    
+    try:
+        if platform.system() == "Darwin":  # macOS
+            result = subprocess.run(["ifconfig"], capture_output=True, text=True)
+            lines = result.stdout.split('\n')
+            current_iface = None
+            
+            for line in lines:
+                if line and not line.startswith('\t') and not line.startswith(' '):
+                    current_iface = line.split(':')[0]
+                elif current_iface and 'inet ' in line and 'inet 127.0.0.1' not in line:
+                    ip = line.split('inet ')[1].split(' ')[0]
+                    if ip.startswith(('192.168.', '10.', '172.')):
+                        interfaces.append(current_iface)
+                        
+        elif platform.system() == "Linux":
+            result = subprocess.run(["ip", "link", "show"], capture_output=True, text=True)
+            for line in result.stdout.split('\n'):
+                if ': ' in line and 'state UP' in line:
+                    iface = line.split(': ')[1].split('@')[0]
+                    if not iface.startswith('lo'):
+                        interfaces.append(iface)
+        
+        # Common interface names to try if detection fails
+        fallback_interfaces = ['wlan0', 'eth0', 'enp2s0', 'en0', 'wlp3s0']
+        for iface in fallback_interfaces:
+            if iface not in interfaces:
+                interfaces.append(iface)
+                
+    except Exception as e:
+        logging.warning(f"Interface detection failed: {e}")
+        interfaces = ['eth0', 'wlan0', 'en0']
+    
+    return interfaces
+
+def find_go2_interface() -> Optional[str]:
+    """Try to find the interface connected to Go2 robot"""
+    interfaces = detect_network_interfaces()
+    
+    # Try to ping Go2's default IP on each interface
+    go2_ip = "192.168.12.1"
+    
+    for interface in interfaces:
+        try:
+            # Try a quick ping test
+            if platform.system() == "Darwin":
+                result = subprocess.run(
+                    ["ping", "-c", "1", "-W", "1000", "-I", interface, go2_ip],
+                    capture_output=True, timeout=2
+                )
+            else:
+                result = subprocess.run(
+                    ["ping", "-c", "1", "-W", "1", "-I", interface, go2_ip],
+                    capture_output=True, timeout=2
+                )
+            
+            if result.returncode == 0:
+                logging.info(f"Found Go2 robot on interface {interface}")
+                return interface
+                
+        except Exception:
+            continue
+    
+    # If no ping success, return the first wireless interface
+    wifi_interfaces = [i for i in interfaces if any(x in i.lower() for x in ['wlan', 'wifi', 'wl'])]
+    if wifi_interfaces:
+        logging.info(f"Using WiFi interface {wifi_interfaces[0]} (no Go2 ping response)")
+        return wifi_interfaces[0]
+    
+    # Fallback to first interface
+    if interfaces:
+        logging.info(f"Using fallback interface {interfaces[0]}")
+        return interfaces[0]
+    
+    return "eth0"
 
 @dataclass
 class RobotState:
@@ -86,23 +178,61 @@ class Go2RobotController:
         
     def connect(self, interface: str = "eth0") -> bool:
         """Connect to the robot"""
+        connected_components = []
+        
         try:
-            if SDK_AVAILABLE:
+            # Try to ping the robot first
+            import subprocess
+            import platform
+            
+            go2_ip = "192.168.12.1"
+            if platform.system() == "Darwin":
+                ping_result = subprocess.run(
+                    ["ping", "-c", "1", "-W", "1000", go2_ip], 
+                    capture_output=True, timeout=3
+                )
+            else:
+                ping_result = subprocess.run(
+                    ["ping", "-c", "1", "-W", "1", go2_ip], 
+                    capture_output=True, timeout=3
+                )
+            
+            robot_reachable = ping_result.returncode == 0
+            
+            if robot_reachable:
+                connected_components.append("🌐 Network")
+                logging.info(f"🌐 Robot reachable at {go2_ip}")
+            else:
+                logging.warning(f"⚠️ Robot not reachable at {go2_ip}")
+            
+            # Try SDK connection if available
+            if SDK_AVAILABLE and robot_reachable:
                 # Initialize actual SDK connection
                 # ChannelFactoryInitialize(0, interface)
                 # self.sport_client = SportClient()
-                pass
+                connected_components.append("🤖 Control API")
             
             # Try to connect to camera
             self.camera = self._setup_camera(interface)
+            if self.camera:
+                connected_components.append("📹 Camera")
+                logging.info("📹 Camera connection established")
+            else:
+                logging.warning("⚠️ Camera connection failed")
             
-            self.connected = True
-            self.state.connected = True
-            logging.info("✅ Connected to Go2 robot")
-            return True
+            # Consider connected if we have any components
+            self.connected = len(connected_components) > 0
+            self.state.connected = robot_reachable
+            
+            if connected_components:
+                logging.info(f"✅ Connected: {' + '.join(connected_components)}")
+                return True
+            else:
+                logging.error("❌ No robot connections established - running in demo mode")
+                return False
             
         except Exception as e:
-            logging.error(f"❌ Failed to connect to robot: {e}")
+            logging.error(f"❌ Connection failed: {e}")
             self.connected = False
             self.state.connected = False
             return False
@@ -198,8 +328,12 @@ class DogServer:
         # Setup logging
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            datefmt='%H:%M:%S'
         )
+        
+        # Suppress websockets library logging
+        logging.getLogger('websockets.server').setLevel(logging.WARNING)
     
     async def register_client(self, websocket, path):
         """Register new WebSocket client"""
@@ -219,9 +353,9 @@ class DogServer:
                 await self.handle_websocket_message(websocket, client_id, message)
                 
         except websockets.exceptions.ConnectionClosed:
-            logging.info(f"🔌 Client disconnected: {client_id}")
+            logging.info(f"👋 Client disconnected: {client_id}")
         except Exception as e:
-            logging.error(f"Client error {client_id}: {e}")
+            logging.error(f"❌ Client error {client_id}: {e}")
         finally:
             self.connected_clients.pop(client_id, None)
     
@@ -492,8 +626,11 @@ class DogServer:
         
         http_server = ThreadedHTTPServer((self.host, self.port + 1), handler)
         
+        # Get local IP for display instead of 0.0.0.0
+        display_ip = get_local_ip() if self.host == "0.0.0.0" else self.host
+        
         def run_server():
-            logging.info(f"🌐 HTTP server running on http://{self.host}:{self.port + 1}")
+            logging.info(f"🌐 HTTP server running on http://{display_ip}:{self.port + 1}")
             http_server.serve_forever()
         
         thread = threading.Thread(target=run_server, daemon=True)
@@ -501,9 +638,17 @@ class DogServer:
         
         return http_server
     
-    async def start(self, interface: str = "eth0"):
+    async def start(self, interface: Optional[str] = None):
         """Start the server"""
         logging.info("🚀 Starting Dog Server...")
+        
+        # Auto-detect interface if not provided
+        if interface is None:
+            interface = find_go2_interface()
+            logging.info(f"🔍 Auto-detected interface: {interface}")
+        
+        # Get actual IP for display
+        local_ip = get_local_ip()
         
         # Connect to robot
         if not self.robot.connect(interface):
@@ -515,8 +660,8 @@ class DogServer:
         # Start WebSocket server and state broadcaster
         self.running = True
         
-        logging.info(f"🐕 WebSocket server running on ws://{self.host}:{self.port}")
-        logging.info(f"🌐 Web interface available at http://{self.host}:{self.port + 1}")
+        logging.info(f"🐕 WebSocket server running on ws://{local_ip}:{self.port}")
+        logging.info(f"🌐 Web interface available at http://{local_ip}:{self.port + 1}")
         
         # Start periodic state updates
         state_task = asyncio.create_task(self.periodic_state_broadcast())
@@ -536,7 +681,7 @@ def main():
     parser = argparse.ArgumentParser(description="Unitree Go2 Remote Control Server")
     parser.add_argument("--host", default="0.0.0.0", help="Server host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8080, help="WebSocket port (default: 8080)")
-    parser.add_argument("--interface", default="eth0", help="Network interface for robot connection")
+    parser.add_argument("--interface", help="Network interface for robot connection (auto-detected if not specified)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     
     args = parser.parse_args()
@@ -544,12 +689,18 @@ def main():
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
     
+    # Get local IP for display
+    local_ip = get_local_ip()
+    
     print("🐕 Unitree Go2 Remote Control Server")
-    print("=" * 40)
-    print(f"WebSocket: ws://{args.host}:{args.port}")
-    print(f"HTTP API: http://{args.host}:{args.port + 1}")
-    print(f"Web UI: http://{args.host}:{args.port + 1}")
-    print("=" * 40)
+    print("=" * 50)
+    print(f"🔍 Auto-detecting network interface...")
+    if args.interface:
+        print(f"📡 Using specified interface: {args.interface}")
+    print(f"🐕 WebSocket API: ws://{local_ip}:{args.port}")
+    print(f"🌐 HTTP API: http://{local_ip}:{args.port + 1}")
+    print(f"🖥️  Web UI: http://{local_ip}:{args.port + 1}")
+    print("=" * 50)
     
     server = DogServer(args.host, args.port)
     

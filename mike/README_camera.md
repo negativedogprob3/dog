@@ -6,7 +6,7 @@ This directory contains Python code to access and display the Unitree Go2's fron
 
 1. **Install dependencies:**
    ```bash
-   pip install -r requirements.txt
+   python3 -m pip install -r requirements.txt
    ```
 
 2. **Connect to Go2:**

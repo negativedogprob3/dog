@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+
+# Set CycloneDDS path if not already set
+import os
+if "CYCLONEDDS_HOME" not in os.environ:
+    cyclone_path = os.path.expanduser("~/cyclonedds/install")
+    if os.path.exists(cyclone_path):
+        os.environ["CYCLONEDDS_HOME"] = cyclone_path
 """
 Unitree Go2 Remote Control Server
 
@@ -42,13 +49,13 @@ try:
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize
     from unitree_sdk2py.go2.video.video_client import VideoClient
     from unitree_sdk2py.go2.sport.sport_client import SportClient
-    from unitree_sdk2py.idl.default import unitree_go_msg_dds__SportModeCmd_
+    from unitree_sdk2py.idl.default import unitree_go_msg_dds__SportModeState_
     from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
     SDK_AVAILABLE = True
     print("✅ Unitree SDK loaded successfully")
 except ImportError as e:
     SDK_AVAILABLE = False
-    print(f"⚠️ Unitree SDK not available: {e}")
+    print(f"⚠️  Unitree SDK not available: {e}")
 
 def get_local_ip() -> str:
     """Get the local IP address that can be reached by other computers"""
@@ -234,7 +241,7 @@ class Go2RobotController:
                     connected_components.append("📹 Camera")
                     
                 except Exception as e:
-                    logging.warning(f"⚠️ SDK setup failed: {e}")
+                    logging.warning(f"⚠️  SDK setup failed: {e}")
             
             # Fallback to GStreamer camera if SDK camera failed
             if not self.video_client:
@@ -245,13 +252,19 @@ class Go2RobotController:
             if robot_reachable:
                 connected_components.append("🌐 Network")
             
-            # Consider connected if we have any components
-            self.connected = len(connected_components) > 0
-            self.state.connected = robot_reachable
+            # Only consider fully connected if we have SDK control
+            has_control = any("🤖 Control API" in comp for comp in connected_components)
+            self.connected = has_control
+            self.state.connected = has_control
             
             if connected_components:
-                logging.info(f"✅ Connected: {' + '.join(connected_components)}")
-                return True
+                if has_control:
+                    logging.info(f"✅ Connected: {' + '.join(connected_components)}")
+                    return True
+                else:
+                    logging.error(f"❌ Robot found but SDK unavailable - install unitree_sdk2py for real control")
+                    logging.warning(f"⚠️  Partial connection: {' + '.join(connected_components)} - running in dogless mode")
+                    return False
             else:
                 # Build failure message with details
                 failures = []
@@ -298,12 +311,9 @@ class Go2RobotController:
                 print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending to robot: vx={scaled_vx:.1f}, vy={scaled_vy:.1f}, vyaw={scaled_vyaw:.1f}")
                 
                 # Send actual command to robot via SDK
-                sport_req = unitree_go_msg_dds__SportModeCmd_()
-                sport_req.vx = scaled_vx
-                sport_req.vy = scaled_vy
-                sport_req.vyaw = scaled_vyaw
-                sport_req.body_height = cmd.body_height
-                self.sport_client.Move(sport_req)
+                result = self.sport_client.Move(scaled_vx, scaled_vy, scaled_vyaw)
+                if result != 0:
+                    print(f"⚠️  Move command failed with result: {result}")
             else:
                 # Show what we would send if connected
                 scaled_vx = cmd.velocity_x * 1.5
@@ -336,7 +346,7 @@ class Go2RobotController:
                     frame = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
                     return frame
             except Exception as e:
-                logging.warning(f"⚠️ SDK camera error: {e}")
+                logging.warning(f"⚠️  SDK camera error: {e}")
         
         # Fallback to GStreamer camera
         if hasattr(self, 'camera') and self.camera is not None:
@@ -373,7 +383,7 @@ class Go2RobotController:
                 self.state.position["z"] = robot_state.position[2] if hasattr(robot_state, 'position') else 0
                 # Add more state updates as needed
             except Exception as e:
-                logging.warning(f"⚠️ State update failed: {e}")
+                logging.warning(f"⚠️  State update failed: {e}")
                 pass
         
         self.state.timestamp = time.time()

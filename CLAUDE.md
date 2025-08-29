@@ -6,7 +6,7 @@ Add things here that future versions of me should know about this codebase.
 
 ## Environment & Technical Notes
 - **Python/pip**: Use `python3 -m pip` instead of `pip` - the system doesn't have `pip` in PATH
-- **Dependencies**: Need to install `websockets` for dog server: `python3 -m pip install websockets`
+- **mike/ dependencies**: System has externally managed Python environment. For system-wide installs use `python3 -m pip install <package> --break-system-packages`. Key dependencies: websockets, opencv-python (cv2), numpy
 - **Unitree Go2**: 
   - Hand controller L2 double-click disables obstacle avoidance for ball interaction
   - Camera access via GStreamer pipeline: `udpsrc address=230.1.1.1 port=1720`

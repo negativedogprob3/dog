@@ -199,12 +199,6 @@ class Go2RobotController:
             
             robot_reachable = ping_result.returncode == 0
             
-            if robot_reachable:
-                connected_components.append("🌐 Network")
-                logging.info(f"🌐 Robot reachable at {go2_ip}")
-            else:
-                logging.warning(f"⚠️ Robot not reachable at {go2_ip}")
-            
             # Try SDK connection if available
             if SDK_AVAILABLE and robot_reachable:
                 # Initialize actual SDK connection
@@ -216,9 +210,9 @@ class Go2RobotController:
             self.camera = self._setup_camera(interface)
             if self.camera:
                 connected_components.append("📹 Camera")
-                logging.info("📹 Camera connection established")
-            else:
-                logging.warning("⚠️ Camera connection failed")
+            
+            if robot_reachable:
+                connected_components.append("🌐 Network")
             
             # Consider connected if we have any components
             self.connected = len(connected_components) > 0
@@ -228,7 +222,15 @@ class Go2RobotController:
                 logging.info(f"✅ Connected: {' + '.join(connected_components)}")
                 return True
             else:
-                logging.error("❌ No robot connections established - running in demo mode")
+                # Build failure message with details
+                failures = []
+                if not robot_reachable:
+                    failures.append("robot unreachable")
+                if not self.camera:
+                    failures.append("camera failed")
+                
+                failure_details = ", ".join(failures)
+                logging.error(f"❌ No robot connections ({failure_details}) - running in dogless mode")
                 return False
             
         except Exception as e:
@@ -253,33 +255,42 @@ class Go2RobotController:
     
     def execute_command(self, cmd: MovementCommand):
         """Execute movement command"""
-        if not self.connected:
-            return False
-        
         self.last_command_time = time.time()
         
         try:
-            if SDK_AVAILABLE:
+            # Log what we're sending to the robot
+            if SDK_AVAILABLE and self.connected:
+                scaled_vx = cmd.velocity_x * 1.5
+                scaled_vy = cmd.velocity_y * 1.0
+                scaled_vyaw = cmd.angular_velocity * 1.5
+                
+                print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending to robot: vx={scaled_vx:.1f}, vy={scaled_vy:.1f}, vyaw={scaled_vyaw:.1f}")
+                
                 # Send actual command to robot via SDK
                 # sport_req = unitree_go_msg_dds__SportModeCmd_()
-                # sport_req.vx = cmd.velocity_x * 1.5  # Scale to robot limits
-                # sport_req.vy = cmd.velocity_y * 1.0
-                # sport_req.vyaw = cmd.angular_velocity * 1.5
+                # sport_req.vx = scaled_vx
+                # sport_req.vy = scaled_vy
+                # sport_req.vyaw = scaled_vyaw
                 # sport_req.body_height = cmd.body_height
                 # self.sport_client.Move(sport_req)
-                pass
+            else:
+                # Show what we would send if connected
+                scaled_vx = cmd.velocity_x * 1.5
+                scaled_vy = cmd.velocity_y * 1.0
+                scaled_vyaw = cmd.angular_velocity * 1.5
+                
+                print(f"{time.strftime('%H:%M:%S')} - 🚷 Would send to robot: vx={scaled_vx:.1f}, vy={scaled_vy:.1f}, vyaw={scaled_vyaw:.1f}")
             
-            # Update mock state for demo
+            # Update mock state
             self.state.velocity["vx"] = cmd.velocity_x
             self.state.velocity["vy"] = cmd.velocity_y 
             self.state.mode = cmd.mode
             self.state.timestamp = time.time()
             
-            logging.debug(f"Command executed: {asdict(cmd)}")
             return True
             
         except Exception as e:
-            logging.error(f"Command execution failed: {e}")
+            logging.error(f"❌ Command execution failed: {e}")
             return False
     
     def get_camera_frame(self) -> Optional[np.ndarray]:
@@ -325,22 +336,53 @@ class DogServer:
         self.connected_clients: Dict[str, websockets.WebSocketServerProtocol] = {}
         self.running = False
         
-        # Setup logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            datefmt='%H:%M:%S'
-        )
+        # Setup logging with custom formatter for colors
+        class ColoredFormatter(logging.Formatter):
+            COLORS = {
+                'ERROR': '\033[91m',    # Red
+                'WARNING': '\033[93m',  # Yellow
+                'INFO': '\033[0m',      # White (default)
+                'DEBUG': '\033[94m',    # Blue
+                'GREEN': '\033[92m',    # Green (special)
+                'RESET': '\033[0m'      # Reset
+            }
+            
+            def format(self, record):
+                # Check if message explicitly requests green color
+                if hasattr(record, 'green') and record.green:
+                    color = self.COLORS['GREEN']
+                else:
+                    color = self.COLORS.get(record.levelname, self.COLORS['RESET'])
+                
+                record.msg = f"{color}{record.msg}{self.COLORS['RESET']}"
+                return super().format(record)
+        
+        handler = logging.StreamHandler()
+        handler.setFormatter(ColoredFormatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S'))
+        
+        logger = logging.getLogger()
+        logger.setLevel(logging.INFO)
+        logger.handlers.clear()
+        logger.addHandler(handler)
         
         # Suppress websockets library logging
         logging.getLogger('websockets.server').setLevel(logging.WARNING)
+        
+    def log_green(self, message: str):
+        """Log a message in green color"""
+        logger = logging.getLogger()
+        record = logger.makeRecord(
+            logger.name, logging.INFO, __file__, 0, message, (), None
+        )
+        record.green = True
+        logger.handle(record)
     
-    async def register_client(self, websocket, path):
+    async def register_client(self, websocket, path=None):
         """Register new WebSocket client"""
         client_id = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
         self.connected_clients[client_id] = websocket
         
-        logging.info(f"🔗 Client connected: {client_id}")
+        print(f"{time.strftime('%H:%M:%S')} - 🔗 Client connected: {client_id}")
         
         try:
             # Send initial state
@@ -353,7 +395,7 @@ class DogServer:
                 await self.handle_websocket_message(websocket, client_id, message)
                 
         except websockets.exceptions.ConnectionClosed:
-            logging.info(f"👋 Client disconnected: {client_id}")
+            print(f"{time.strftime('%H:%M:%S')} - 🔗💥 Client disconnected: {client_id}")
         except Exception as e:
             logging.error(f"❌ Client error {client_id}: {e}")
         finally:
@@ -369,6 +411,25 @@ class DogServer:
                 # Movement command
                 cmd_data = data.get("data", {})
                 command = MovementCommand(**cmd_data)
+                
+                # Log the received command in human-readable format
+                if command.velocity_x > 0:
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to move forward")
+                elif command.velocity_x < 0:
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to move backward")
+                elif command.velocity_y < 0:
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to move left")
+                elif command.velocity_y > 0:
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to move right")
+                elif command.angular_velocity < 0:
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to turn left")
+                elif command.angular_velocity > 0:
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to turn right")
+                elif command.mode != "walk":
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to {command.mode}")
+                else:
+                    print(f"{time.strftime('%H:%M:%S')} - 🛑 Received stop command")
+                
                 success = self.robot.execute_command(command)
                 
                 await websocket.send(json.dumps({
@@ -640,19 +701,18 @@ class DogServer:
     
     async def start(self, interface: Optional[str] = None):
         """Start the server"""
-        logging.info("🚀 Starting Dog Server...")
+        print(f"{time.strftime('%H:%M:%S')} - 🚀 Starting Dog Server...")
         
         # Auto-detect interface if not provided
         if interface is None:
             interface = find_go2_interface()
-            logging.info(f"🔍 Auto-detected interface: {interface}")
+            print(f"{time.strftime('%H:%M:%S')} - 🔍 Auto-detected interface: {interface}")
         
         # Get actual IP for display
         local_ip = get_local_ip()
         
         # Connect to robot
-        if not self.robot.connect(interface):
-            logging.warning("⚠️ Could not connect to robot, running in demo mode")
+        self.robot.connect(interface)
         
         # Start HTTP server
         http_server = self.start_http_server()
@@ -660,14 +720,21 @@ class DogServer:
         # Start WebSocket server and state broadcaster
         self.running = True
         
-        logging.info(f"🐕 WebSocket server running on ws://{local_ip}:{self.port}")
-        logging.info(f"🌐 Web interface available at http://{local_ip}:{self.port + 1}")
+        print(f"🐕 WebSocket server running on ws://{local_ip}:{self.port}")
+        print(f"🌐 Web interface available at http://{local_ip}:{self.port + 1}")
+        self.log_green("✅ Ready to receive client connections")
         
         # Start periodic state updates
         state_task = asyncio.create_task(self.periodic_state_broadcast())
         
-        # Start WebSocket server
-        async with websockets.serve(self.register_client, self.host, self.port):
+        # Start WebSocket server with keepalive settings
+        async with websockets.serve(
+            self.register_client, 
+            self.host, 
+            self.port,
+            ping_interval=30,  # Send ping every 30 seconds
+            ping_timeout=10    # Wait 10 seconds for pong
+        ):
             try:
                 await asyncio.Future()  # Run forever
             except KeyboardInterrupt:

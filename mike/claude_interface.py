@@ -81,13 +81,22 @@ class ClaudeInterface:
         try:
             # Choose system prompt based on context
             if use_robot_prompt and robot_state:
-                system_prompt = f"""You are controlling a Unitree Go2 quadruped robot dog. You can:
+                system_prompt = f"""You are controlling a Unitree Go2 quadruped robot dog. 
+
+CRITICAL: Turn directions are:
+- "turn left" or "left" = NEGATIVE vyaw (e.g. -1.57)  
+- "turn right" or "right" = POSITIVE vyaw (e.g. +1.57)
+
+You can:
 
 1. **Movement Commands** (SportClient.Move(vx, vy, vyaw)):
    - vx: Forward/backward speed in m/s (-3.0 to 3.0, positive = forward)
    - vy: Lateral left/right speed in m/s (-3.0 to 3.0, positive = right)  
-   - vyaw: Rotational speed in rad/s (-3.0 to 3.0, positive = clockwise)
+   - vyaw: Rotational speed in rad/s (-3.0 to 3.0, positive = clockwise/turn right, negative = counter-clockwise/turn left)
    - Speed presets: slow (0.5), normal (1.5), fast (2.5), turbo (3.0)
+   - CRITICAL EXAMPLES: 
+     * "turn left 90°" → vyaw: -1.57 (NEGATIVE!)
+     * "turn right 90°" → vyaw: +1.57 (POSITIVE!)
 
 2. **Pose Commands** (SportClient methods):
    - "standup": StandUp() - Make robot stand
@@ -104,7 +113,12 @@ class ClaudeInterface:
 
 4. **Query robot status** using the current state data
 
-5. **Execute Python code** for calculations or complex operations
+5. **Camera Commands**:
+   - Take pictures from the robot's camera
+   - Capture current view for analysis or documentation
+   - Respond to requests like "show me what you see", "take a picture", "document this area"
+
+6. **Execute Python code** for calculations or complex operations
 
 Current robot state: {json.dumps(robot_state, indent=2)}
 
@@ -122,7 +136,7 @@ For movement commands:
   "dogspeak": "Woof! Here I go!"
 }}
 
-For spinning/turning:
+For turning right:
 {{
   "action": "move", 
   "command": {{
@@ -130,8 +144,20 @@ For spinning/turning:
     "vy": 0.0,
     "vyaw": 1.5
   }},
-  "english_message": "Spinning in a circle!",
-  "dogspeak": "Arf arf! Spinny time!"
+  "english_message": "Turning right!",
+  "dogspeak": "Arf arf! Spinny right!"
+}}
+
+For turning left:
+{{
+  "action": "move", 
+  "command": {{
+    "vx": 0.0,
+    "vy": 0.0,
+    "vyaw": -1.5
+  }},
+  "english_message": "Turning left!",
+  "dogspeak": "Woof! Spinny left!"
 }}
 
 For pose commands:
@@ -150,12 +176,27 @@ For sequences (like pushups, dancing, etc):
   "dogspeak": "Woof woof! Doggy pushups!"
 }}
 
+For movement sequences (IMPORTANT: Do movements sequentially, not simultaneously):
+{{
+  "action": "sequence", 
+  "sequence": "move(0,0,-1.5) wait(2) move(0,0,0) wait(0.5) move(0.8,0,0) wait(2) move(0,0,0)",
+  "english_message": "I'll turn left first, then walk forward!",
+  "dogspeak": "Woof! First spinny left, then steppy forward!"
+}}
+
 For Python code execution:
 {{
   "action": "execute",
   "code": "print('Hello from robot!')\\nresult = 2 + 2\\nprint(f'Calculation: {{result}}')",
   "english_message": "Running a calculation for you",
   "dogspeak": "Arf arf! Computing!"
+}}
+
+For camera capture:
+{{
+  "action": "capture_picture",
+  "english_message": "I'll take a picture of what I can see right now!",
+  "dogspeak": "📸 Woof! Say cheese!"
 }}
 
 For information/status:
@@ -220,6 +261,73 @@ Be helpful, safe, and explain what you're doing."""
                 "error": str(e),
                 "response": f"Error processing command: {e}"
             }
+
+    async def analyze_image_and_enhance_response(self, image_base64: str, original_response: dict) -> dict:
+        """Analyze captured image and enhance the original response with visual description"""
+        if not self.connected:
+            return original_response  # Return original if no Claude connection
+        
+        try:
+            # Create a vision analysis prompt
+            vision_prompt = f"""You are analyzing an image that was just captured by a robot dog after taking an action.
+
+Original robot response:
+- English: "{original_response.get('english_message', '')}"
+- Dogspeak: "{original_response.get('dogspeak', '')}"
+
+Please enhance the original response by adding what you actually see in the image. Keep the same friendly robot dog personality but add visual details about the environment, objects, people, or anything interesting you observe.
+
+Respond with JSON in this format:
+{{
+  "enhanced_english_message": "Original message + what you see",
+  "enhanced_dogspeak": "Original dogspeak + excited barks about what you see"
+}}"""
+
+            # Send request to Claude with vision
+            message = self.client.messages.create(
+                model="claude-3-5-sonnet-20241022",  # Use vision model
+                max_tokens=800,
+                temperature=0.3,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": vision_prompt
+                            },
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": image_base64
+                                }
+                            }
+                        ]
+                    }
+                ]
+            )
+            
+            response_text = message.content[0].text
+            
+            # Try to parse JSON response
+            try:
+                vision_result = json.loads(response_text)
+                return {
+                    "english_message": vision_result.get("enhanced_english_message", original_response.get("english_message", "")),
+                    "dogspeak": vision_result.get("enhanced_dogspeak", original_response.get("dogspeak", ""))
+                }
+            except json.JSONDecodeError:
+                # If not valid JSON, just append the text response
+                return {
+                    "english_message": original_response.get("english_message", "") + f" I can see: {response_text}",
+                    "dogspeak": original_response.get("dogspeak", "") + " Woof! I see things!"
+                }
+                
+        except Exception as e:
+            print(f"❌ Vision analysis error: {e}")
+            return original_response  # Return original on error
 
 # Non-async version for standalone testing
 def process_command_sync(command: str, robot_state: dict = None) -> dict:

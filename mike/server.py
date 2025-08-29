@@ -370,22 +370,24 @@ class Go2RobotController:
         return None
     
     def capture_picture(self, filename: Optional[str] = None) -> Optional[str]:
-        """Capture a picture from the camera and save to disk"""
+        """Capture a picture from the camera and save to temp directory"""
         frame = self.get_camera_frame()
         if frame is None:
             return None
         
         if filename is None:
-            # Generate filename with timestamp
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            filename = f"robot_photo_{timestamp}.jpg"
+            # Use temp file that gets cleaned up
+            import tempfile
+            temp_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+            filepath = temp_file.name
+            temp_file.close()
+        else:
+            filepath = os.path.abspath(filename)
         
-        # Save to current directory
-        filepath = os.path.abspath(filename)
         success = cv2.imwrite(filepath, frame)
         
         if success:
-            print(f"📸 Picture saved: {filepath}")
+            print(f"📸 Picture saved to temp: {os.path.basename(filepath)}")
             return filepath
         else:
             print("❌ Failed to save picture")
@@ -530,12 +532,6 @@ class DogServer:
         print(f"{time.strftime('%H:%M:%S')} - 🔗 Client connected: {client_id}")
         
         try:
-            # Send initial state
-            await websocket.send(json.dumps({
-                "type": "state",
-                "data": asdict(self.robot.state)
-            }))
-            
             async for message in websocket:
                 await self.handle_websocket_message(websocket, client_id, message)
                 
@@ -584,10 +580,10 @@ class DogServer:
                 }))
                 
             elif msg_type == "get_state":
-                # State request
+                # State requests removed per user request
                 await websocket.send(json.dumps({
-                    "type": "state",
-                    "data": asdict(self.robot.state)
+                    "type": "error",
+                    "message": "State requests not supported"
                 }))
                 
             elif msg_type == "get_camera":
@@ -672,23 +668,38 @@ class DogServer:
                         asyncio.create_task(self.execute_sequence_string(sequence_str))
                     
                     elif action == "capture_picture":
-                        filepath = self.robot.capture_picture()
-                        if filepath:
-                            # Open the picture file for the user
+                        # Get frame directly instead of saving to file
+                        frame = self.robot.get_camera_frame()
+                        if frame is not None:
+                            # Encode frame as base64 JPEG for transmission
+                            _, buffer = cv2.imencode('.jpg', frame)
+                            frame_b64 = base64.b64encode(buffer).decode('utf-8')
+                            
+                            print(f"📸 Picture captured, analyzing with Claude vision...")
+                            
+                            # Enhance response with vision analysis
                             try:
-                                import subprocess
-                                import platform
-                                if platform.system() == "Darwin":  # macOS
-                                    subprocess.run(["open", filepath])
-                                elif platform.system() == "Windows":
-                                    subprocess.run(["start", filepath], shell=True)
-                                else:  # Linux
-                                    subprocess.run(["xdg-open", filepath])
-                                
-                                print(f"📸 Picture captured and opened: {filepath}")
-                                
+                                enhanced_response = await self.claude.analyze_image_and_enhance_response(
+                                    frame_b64, response_data
+                                )
+                                english_message = enhanced_response.get("english_message")
+                                dogspeak = enhanced_response.get("dogspeak")
+                                print(f"🔍 Vision analysis complete")
                             except Exception as e:
-                                print(f"❌ Failed to open picture: {e}")
+                                print(f"❌ Vision analysis failed: {e}")
+                                english_message = response_data.get("english_message", "I took a picture for you!")
+                                dogspeak = response_data.get("dogspeak", "📸 Woof! Got a great shot!")
+                            
+                            await websocket.send(json.dumps({
+                                "type": "natural_language_response",
+                                "success": True,
+                                "english_message": english_message,
+                                "dogspeak": dogspeak,
+                                "image_data": frame_b64,  # Include image data
+                                "timestamp": time.time()
+                            }))
+                            # Image response sent, skip normal response sending
+                            return
                         else:
                             print("❌ Failed to capture picture - camera not available")
                     
@@ -747,6 +758,61 @@ class DogServer:
                     duration = float(duration_str)
                     print(f"{time.strftime('%H:%M:%S')} - 🎮 Step {i+1}: wait ({duration}s)")
                     await asyncio.sleep(duration)
+                    
+                elif step == 'capture_picture':
+                    # Handle camera capture in sequence
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Step {i+1}: capture_picture")
+                    frame = self.robot.get_camera_frame()
+                    if frame is not None:
+                        # Encode and broadcast image to all connected clients
+                        _, buffer = cv2.imencode('.jpg', frame)
+                        frame_b64 = base64.b64encode(buffer).decode('utf-8')
+                        
+                        print(f"📸 Picture captured in sequence, analyzing with Claude vision...")
+                        
+                        # Do vision analysis for sequence images too
+                        try:
+                            # Create a simple context for sequence images
+                            sequence_context = {
+                                "english_message": f"Step {i+1}: Picture captured during sequence",
+                                "dogspeak": f"📸 Woof! Sequence photo #{i+1}!"
+                            }
+                            enhanced_response = await self.claude.analyze_image_and_enhance_response(
+                                frame_b64, sequence_context
+                            )
+                            enhanced_message = enhanced_response.get("english_message")
+                            enhanced_dogspeak = enhanced_response.get("dogspeak")
+                            print(f"🔍 Sequence vision analysis complete")
+                        except Exception as e:
+                            print(f"❌ Sequence vision analysis failed: {e}")
+                            enhanced_message = f"📸 Step {i+1}: Picture captured during sequence"
+                            enhanced_dogspeak = f"📸 Woof! Sequence photo #{i+1}!"
+                        
+                        # Send to all clients with enhanced description
+                        await self.broadcast_message({
+                            "type": "sequence_image",
+                            "image_data": frame_b64,
+                            "message": enhanced_message,
+                            "dogspeak": enhanced_dogspeak,
+                            "timestamp": time.time()
+                        })
+                        print(f"📸 Enhanced sequence picture sent to clients")
+                    else:
+                        print(f"❌ Failed to capture picture in sequence step {i+1}")
+                        
+                elif step.startswith('move(') and step.endswith(')'):
+                    # Parse move command: move(vx,vy,vyaw)
+                    params_str = step[5:-1]  # Remove 'move(' and ')'
+                    params = [float(x) for x in params_str.split(',')]
+                    if len(params) == 3:
+                        vx, vy, vyaw = params
+                        print(f"{time.strftime('%H:%M:%S')} - 🎮 Step {i+1}: move({vx}, {vy}, {vyaw})")
+                        success = self.robot.move_robot(vx, vy, vyaw)
+                        if not success:
+                            print(f"❌ Failed to execute move in sequence step {i+1}")
+                    else:
+                        print(f"❌ Invalid move parameters in step {i+1}: {step}")
+                        
                 else:
                     # Execute pose command using real SDK
                     print(f"{time.strftime('%H:%M:%S')} - 🎮 Step {i+1}: {step}")
@@ -756,6 +822,15 @@ class DogServer:
                 
             except Exception as e:
                 print(f"❌ Sequence step {i+1} error: {e}")
+            
+            # Send keepalive after each step to prevent client timeout
+            if i % 3 == 0:  # Every 3 steps
+                await self.broadcast_message({
+                    "type": "sequence_keepalive",
+                    "step": i + 1,
+                    "total_steps": len(steps),
+                    "timestamp": time.time()
+                })
     
     async def broadcast_message(self, message: dict):
         """Broadcast message to all connected clients"""
@@ -765,20 +840,17 @@ class DogServer:
                 return_exceptions=True
             )
     
-    async def periodic_state_broadcast(self):
-        """Periodically broadcast robot state to all clients"""
-        while self.running:
-            try:
-                self.robot.update_state()
-                await self.broadcast_message({
-                    "type": "state_update",
-                    "data": asdict(self.robot.state)
-                })
-                await asyncio.sleep(0.1)  # 10Hz updates
-                
-            except Exception as e:
-                logging.error(f"State broadcast error: {e}")
-                await asyncio.sleep(1)
+    async def cleanup_temp_file(self, filepath: str, delay: int = 5):
+        """Clean up temporary file after a delay"""
+        try:
+            await asyncio.sleep(delay)
+            if os.path.exists(filepath):
+                os.unlink(filepath)
+                print(f"🗑️  Cleaned up temp file: {os.path.basename(filepath)}")
+        except Exception as e:
+            print(f"⚠️  Failed to clean up temp file: {e}")
+    
+    # State broadcasting removed per user request
     
     def create_http_handler(self):
         """Create HTTP request handler for REST API"""
@@ -997,8 +1069,7 @@ class DogServer:
         print(f"🌐 Web interface available at http://{local_ip}:{self.port + 1}")
         self.log_green("✅ Ready to receive client connections")
         
-        # Start periodic state updates
-        state_task = asyncio.create_task(self.periodic_state_broadcast())
+        # State broadcasting removed per user request
         
         # Start WebSocket server with keepalive settings
         async with websockets.serve(

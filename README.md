@@ -2,6 +2,35 @@
 
 A clean and organized repository for dog-related development.
 
+## Quick Start
+
+### Install Dependencies
+```bash
+cd mike
+python3 -m pip install -r requirements.txt
+```
+
+### Run Server
+```bash
+./dog_server.py
+# Auto-detects network interface
+# Ready when you see: ✅ Ready to receive client connections
+```
+
+### Run Client (from another terminal/computer)
+```bash
+./client_example.py
+# Enter server IP when prompted (or press Enter for default)
+# Use WASD keys to control robot, ESC to quit
+```
+
+### Run Camera Access
+```bash
+./camera_access.py
+# or for quick test:
+./simple_camera.py eth0
+```
+
 ## Experiment Challenge
 
 The ultimate goal is to get the Unitree Go2 Edu quadruped robot to bring a beach ball back to you. The challenge is divided into three phases of increasing difficulty:

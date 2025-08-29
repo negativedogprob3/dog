@@ -70,8 +70,23 @@ class ChatClient:
         
         try:
             await self.websocket.send(json.dumps(message))
-            response = await self.websocket.recv()
-            return json.loads(response)
+            
+            # Listen for response (and handle any sequence images)
+            while True:
+                response = await self.websocket.recv()
+                data = json.loads(response)
+                
+                # Handle sequence images separately
+                if data.get("type") == "sequence_image":
+                    await self.handle_sequence_image(data)
+                    continue
+                    
+                # Handle keepalive messages (ignore silently)
+                if data.get("type") == "sequence_keepalive":
+                    continue
+                    
+                # Return the main response
+                return data
             
         except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedError):
             print_r("🔄 Connection lost, attempting reconnect...")
@@ -90,6 +105,41 @@ class ChatClient:
             import traceback
             print_r(f"🔍 Full traceback: {traceback.format_exc()}")
             return None
+    
+    async def handle_sequence_image(self, data):
+        """Handle image received during a sequence"""
+        try:
+            import base64
+            import tempfile
+            import subprocess
+            import platform
+            
+            image_data = data.get("image_data")
+            message = data.get("message", "Sequence image")
+            dogspeak = data.get("dogspeak", "")
+            
+            if image_data:
+                # Decode and save image to temp file
+                image_bytes = base64.b64decode(image_data)
+                temp_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+                temp_file.write(image_bytes)
+                temp_file.close()
+                
+                # Open the image
+                if platform.system() == "Darwin":  # macOS
+                    subprocess.run(["open", temp_file.name])
+                elif platform.system() == "Windows":
+                    subprocess.run(["start", temp_file.name], shell=True)
+                else:  # Linux
+                    subprocess.run(["xdg-open", temp_file.name])
+                
+                # Print both enhanced messages
+                print_r(f"☀️  {message}")
+                if dogspeak:
+                    print_r(f"🐕 {dogspeak}")
+                
+        except Exception as e:
+            print_r(f"❌ Failed to handle sequence image: {e}")
     
     async def close(self):
         """Close connection"""
@@ -145,6 +195,34 @@ async def main():
             
             if response:
                 if response.get("success"):
+                    # Handle image data if present
+                    image_data = response.get("image_data")
+                    if image_data:
+                        try:
+                            import base64
+                            import tempfile
+                            import subprocess
+                            import platform
+                            
+                            # Decode and save image to temp file
+                            image_bytes = base64.b64decode(image_data)
+                            temp_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+                            temp_file.write(image_bytes)
+                            temp_file.close()
+                            
+                            # Open the image
+                            if platform.system() == "Darwin":  # macOS
+                                subprocess.run(["open", temp_file.name])
+                            elif platform.system() == "Windows":
+                                subprocess.run(["start", temp_file.name], shell=True)
+                            else:  # Linux
+                                subprocess.run(["xdg-open", temp_file.name])
+                            
+                            print_r(f"📸 Picture received and opened!")
+                            
+                        except Exception as e:
+                            print_r(f"❌ Failed to handle image: {e}")
+                    
                     # Print English message with sun emoji
                     english_message = response.get("english_message", "")
                     if english_message:

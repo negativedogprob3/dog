@@ -15,13 +15,13 @@ def create_mcp_settings():
     
     # Get current directory
     current_dir = os.getcwd()
-    server_path = os.path.join(current_dir, "mcp_robot_server.py")
+    server_path = os.path.join(current_dir, "mcp_robot_server_minimal.py")
     
     # MCP server configuration for Claude Desktop
     mcp_config = {
         "mcpServers": {
             "unitree-go2-robot": {
-                "command": "python3",
+                "command": "/Users/dogtrial4/.pyenv/shims/python",
                 "args": [server_path, "en8"],  # Default network interface
                 "env": {}
             }
@@ -115,8 +115,8 @@ def main():
     print("=" * 50)
     
     # Check if we're in the right directory
-    if not os.path.exists("mcp_robot_server.py"):
-        print("❌ mcp_robot_server.py not found in current directory")
+    if not os.path.exists("mcp_robot_server_minimal.py"):
+        print("❌ mcp_robot_server_minimal.py not found in current directory")
         print("   Please run this script from the directory containing the MCP server")
         return 1
     
@@ -155,18 +155,17 @@ def main():
     print("   - get_robot_pose: Get current robot position/orientation")
     print("   - robot_stand_up: Make robot stand up")
     print("   - robot_move: Move robot with specified speeds")
-    print("   - enable_lidar: Turn on lidar sensor")
-    print("   - detect_green_ball: Find and localize green ball")
+    print("   - robot_stop: Stop robot movement")
     print("   - get_robot_status: Get comprehensive robot status")
     
     print("\n🚀 Example Usage in Claude:")
     print('   "Can you take a picture with the robot camera?"')
     print('   "Make the robot stand up and move forward slowly"')
-    print('   "Enable the lidar and show me the point cloud data"')
-    print('   "Find the green ball and tell me its position"')
+    print('   "What is the robot\'s current position?"')
+    print('   "Stop the robot and show me its status"')
     
     print(f"\n📁 Server Files:")
-    print(f"   Main server: {os.path.abspath('mcp_robot_server.py')}")
+    print(f"   Main server: {os.path.abspath('mcp_robot_server_minimal.py')}")
     print(f"   Config: {os.path.abspath('mcp_server_config.json')}")
     print(f"   This installer: {os.path.abspath(__file__)}")
     

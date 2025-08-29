@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-MCP Server for Unitree Go2 Robot Control
+Minimal MCP Server for Unitree Go2 Robot Control
 
 Provides Claude with access to:
 - Camera feed and image capture
 - Robot pose and position data
 - Robot movement control
-- Ball detection and localization
-- Lidar point cloud data
+(No lidar functionality)
 """
 
 import asyncio
@@ -17,7 +16,6 @@ import time
 import math
 import numpy as np
 import cv2
-import struct
 from typing import Any, Dict, List, Optional
 from mcp.server import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
@@ -25,18 +23,15 @@ import mcp.server.stdio
 import mcp.types as types
 
 # Unitree SDK imports
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber, ChannelPublisher
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
 from unitree_sdk2py.go2.video.video_client import VideoClient
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import PoseStamped_
-from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
-from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
-from unitree_sdk2py.idl.default import std_msgs_msg_dds__String_
 
-class RobotMCPServer:
+class MinimalRobotMCPServer:
     def __init__(self, network_interface: str = None):
-        self.server = Server("unitree-go2-robot")
+        self.server = Server("unitree-go2-robot-minimal")
         
         # Initialize Unitree SDK
         if network_interface:
@@ -64,18 +59,6 @@ class RobotMCPServer:
         self.sport_client.Init()
         self.is_standing = False
         
-        # Lidar control
-        self.lidar_switch_publisher = ChannelPublisher("rt/utlidar/switch", String_)
-        self.lidar_switch_publisher.Init()
-        
-        # Point cloud data
-        self.latest_pointcloud = None
-        self.has_pointcloud = False
-        
-        # Ball detection parameters (COMMENTED OUT)
-        # self.ball_diameter = 0.5  # 50cm
-        # self.current_ball_position = None
-        
         # Setup subscribers
         self._setup_subscribers()
         
@@ -87,20 +70,16 @@ class RobotMCPServer:
         try:
             self.pose_subscriber = ChannelSubscriber("rt/utlidar/robot_pose", PoseStamped_)
             self.pose_subscriber.Init(self._pose_handler, 10)
+            print("✅ Subscribed to robot pose")
         except Exception as e:
-            print(f"Failed to subscribe to robot pose: {e}")
+            print(f"⚠️  Failed to subscribe to robot_pose: {e}")
             
         try:
             self.odom_subscriber = ChannelSubscriber("rt/lio_sam_ros2/mapping/odometry", Odometry_)
             self.odom_subscriber.Init(self._odom_handler, 10)
+            print("✅ Subscribed to SLAM odometry")
         except Exception as e:
-            print(f"Failed to subscribe to odometry: {e}")
-            
-        try:
-            self.pointcloud_subscriber = ChannelSubscriber("rt/utlidar/cloud", PointCloud2_)
-            self.pointcloud_subscriber.Init(self._pointcloud_handler, 10)
-        except Exception as e:
-            print(f"Failed to subscribe to point cloud: {e}")
+            print(f"⚠️  Failed to subscribe to SLAM odometry: {e}")
             
     def _quaternion_to_euler(self, qx, qy, qz, qw):
         """Convert quaternion to euler angles"""
@@ -146,11 +125,6 @@ class RobotMCPServer:
             msg.pose.pose.orientation.z, msg.pose.pose.orientation.w
         )
         self.has_pose_data = True
-        
-    def _pointcloud_handler(self, msg: PointCloud2_):
-        """Handle point cloud updates"""
-        self.latest_pointcloud = msg
-        self.has_pointcloud = True
         
     def _register_tools(self):
         """Register all MCP tools"""
@@ -247,75 +221,10 @@ class RobotMCPServer:
                     }
                 ),
                 
-                # Lidar tools
-                types.Tool(
-                    name="enable_lidar",
-                    description="Enable the robot's lidar sensor",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {}
-                    }
-                ),
-                
-                types.Tool(
-                    name="disable_lidar", 
-                    description="Disable the robot's lidar sensor",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {}
-                    }
-                ),
-                
-                types.Tool(
-                    name="get_point_cloud_data",
-                    description="Get current lidar point cloud data",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "max_points": {
-                                "type": "integer",
-                                "description": "Maximum number of points to return (default 1000)"
-                            },
-                            "min_distance": {
-                                "type": "number",
-                                "description": "Minimum distance filter in meters (default 0.1)"
-                            },
-                            "max_distance": {
-                                "type": "number", 
-                                "description": "Maximum distance filter in meters (default 10.0)"
-                            }
-                        }
-                    }
-                ),
-                
-                # Ball detection tools (COMMENTED OUT)
-                # types.Tool(
-                #     name="detect_green_ball",
-                #     description="Detect and localize green ball in camera view using RGB(90,180,120)",
-                #     inputSchema={
-                #         "type": "object",
-                #         "properties": {
-                #             "use_3d_validation": {
-                #                 "type": "boolean",
-                #                 "description": "Use 3D point cloud for validation (default true)"
-                #             }
-                #         }
-                #     }
-                # ),
-                
-                # types.Tool(
-                #     name="get_ball_position",
-                #     description="Get current detected ball position in world coordinates",
-                #     inputSchema={
-                #         "type": "object",
-                #         "properties": {}
-                #     }
-                # ),
-                
                 # Utility tools
                 types.Tool(
                     name="get_robot_status",
-                    description="Get comprehensive robot status including all sensors",
+                    description="Get comprehensive robot status",
                     inputSchema={
                         "type": "object",
                         "properties": {}
@@ -340,16 +249,6 @@ class RobotMCPServer:
                     return await self._robot_move(arguments)
                 elif name == "robot_stop":
                     return await self._robot_stop(arguments)
-                elif name == "enable_lidar":
-                    return await self._enable_lidar(arguments)
-                elif name == "disable_lidar":
-                    return await self._disable_lidar(arguments)
-                elif name == "get_point_cloud_data":
-                    return await self._get_point_cloud_data(arguments)
-                # elif name == "detect_green_ball":
-                #     return await self._detect_green_ball(arguments)
-                # elif name == "get_ball_position":
-                #     return await self._get_ball_position(arguments)
                 elif name == "get_robot_status":
                     return await self._get_robot_status(arguments)
                 else:
@@ -361,7 +260,7 @@ class RobotMCPServer:
                     text=f"Error executing {name}: {str(e)}"
                 )]
     
-    async def _capture_image(self, args: dict) -> list[types.TextContent]:
+    async def _capture_image(self, args: dict) -> list[types.TextContent | types.ImageContent]:
         """Capture image from robot camera"""
         try:
             code, data = self.video_client.GetImageSample()
@@ -391,12 +290,21 @@ class RobotMCPServer:
             if save_path:
                 cv2.imwrite(save_path, frame)
                 
-            return [types.TextContent(
-                type="text",
-                text=f"Image captured successfully. Resolution: {frame.shape[1]}x{frame.shape[0]}\n"
-                     f"Base64 data: data:image/jpeg;base64,{image_b64}"
-                     + (f"\nSaved to: {save_path}" if save_path else "")
-            )]
+            # Return both text description and the actual image
+            results = [
+                types.TextContent(
+                    type="text",
+                    text=f"Image captured from Go2 robot camera. Resolution: {frame.shape[1]}x{frame.shape[0]}"
+                         + (f"\nSaved to: {save_path}" if save_path else "")
+                ),
+                types.ImageContent(
+                    type="image",
+                    data=image_b64,
+                    mimeType="image/jpeg"
+                )
+            ]
+            
+            return results
             
         except Exception as e:
             return [types.TextContent(
@@ -416,8 +324,7 @@ class RobotMCPServer:
             type="text",
             text=f"""Robot Pose:
 Position: x={self.robot_x:.3f}m, y={self.robot_y:.3f}m, z={self.robot_z:.3f}m
-Orientation: roll={math.degrees(self.robot_roll):.1f}°, pitch={math.degrees(self.robot_pitch):.1f}°, yaw={math.degrees(self.robot_yaw):.1f}°
-Quaternion: Available in raw data if needed"""
+Orientation: roll={math.degrees(self.robot_roll):.1f}°, pitch={math.degrees(self.robot_pitch):.1f}°, yaw={math.degrees(self.robot_yaw):.1f}°"""
         )]
     
     async def _get_robot_position_map(self, args: dict) -> list[types.TextContent]:
@@ -434,8 +341,7 @@ Quaternion: Available in raw data if needed"""
 Coordinates: ({self.robot_x:.3f}, {self.robot_y:.3f})
 Height: {self.robot_z:.3f}m
 Heading: {math.degrees(self.robot_yaw):.1f}° (0° = East, 90° = North)
-Coordinate System: SLAM world frame (meters)
-Data Source: {'SLAM odometry + Lidar localization' if self.has_pose_data else 'Unknown'}"""
+Coordinate System: SLAM world frame (meters)"""
         )]
     
     async def _robot_stand_up(self, args: dict) -> list[types.TextContent]:
@@ -543,251 +449,9 @@ Data Source: {'SLAM odometry + Lidar localization' if self.has_pose_data else 'U
                 text=f"Stop command failed: {str(e)}"
             )]
     
-    async def _enable_lidar(self, args: dict) -> list[types.TextContent]:
-        """Enable lidar sensor"""
-        try:
-            switch_msg = std_msgs_msg_dds__String_()
-            switch_msg.data = "ON"
-            self.lidar_switch_publisher.Write(switch_msg)
-            
-            await asyncio.sleep(2)  # Give lidar time to start
-            
-            return [types.TextContent(
-                type="text",
-                text="Lidar sensor enabled. Point cloud data should be available shortly."
-            )]
-        except Exception as e:
-            return [types.TextContent(
-                type="text",
-                text=f"Failed to enable lidar: {str(e)}"
-            )]
-    
-    async def _disable_lidar(self, args: dict) -> list[types.TextContent]:
-        """Disable lidar sensor"""
-        try:
-            switch_msg = std_msgs_msg_dds__String_()
-            switch_msg.data = "OFF"
-            self.lidar_switch_publisher.Write(switch_msg)
-            
-            return [types.TextContent(
-                type="text",
-                text="Lidar sensor disabled."
-            )]
-        except Exception as e:
-            return [types.TextContent(
-                type="text",
-                text=f"Failed to disable lidar: {str(e)}"
-            )]
-    
-    async def _get_point_cloud_data(self, args: dict) -> list[types.TextContent]:
-        """Get lidar point cloud data"""
-        if not self.has_pointcloud or self.latest_pointcloud is None:
-            return [types.TextContent(
-                type="text",
-                text="No point cloud data available. Enable lidar first with enable_lidar."
-            )]
-        
-        try:
-            max_points = args.get('max_points', 1000)
-            min_distance = args.get('min_distance', 0.1)
-            max_distance = args.get('max_distance', 10.0)
-            
-            # Parse point cloud
-            points = []
-            msg = self.latest_pointcloud
-            point_step = msg.point_step
-            data = bytes(msg.data)
-            
-            count = 0
-            for i in range(0, min(msg.width, max_points * 2)):  # Sample more than needed
-                if count >= max_points:
-                    break
-                    
-                offset = i * point_step
-                if offset + point_step <= len(data):
-                    try:
-                        point_data = struct.unpack_from('<fff4xf H 2x f', data, offset)
-                        x, y, z, intensity, ring, timestamp = point_data
-                        
-                        distance = math.sqrt(x**2 + y**2 + z**2)
-                        if min_distance <= distance <= max_distance and not (np.isnan(x) or np.isnan(y) or np.isnan(z)):
-                            points.append({
-                                'x': round(x, 3),
-                                'y': round(y, 3), 
-                                'z': round(z, 3),
-                                'intensity': round(intensity, 1),
-                                'distance': round(distance, 3)
-                            })
-                            count += 1
-                    except:
-                        continue
-            
-            return [types.TextContent(
-                type="text",
-                text=f"""Point Cloud Data:
-Total points: {len(points)}/{msg.width}
-Distance range: {min_distance}m to {max_distance}m
-Sample points (first 10):
-""" + "\n".join([f"  Point {i+1}: x={p['x']}, y={p['y']}, z={p['z']}, dist={p['distance']}m, intensity={p['intensity']}" 
-                 for i, p in enumerate(points[:10])]) + 
-f"\n\nFull data available as JSON: {json.dumps(points[:100])}"  # Return first 100 points as JSON
-            )]
-            
-        except Exception as e:
-            return [types.TextContent(
-                type="text",
-                text=f"Failed to parse point cloud: {str(e)}"
-            )]
-    
-    # COMMENTED OUT - Ball detection functionality
-    # async def _detect_green_ball(self, args: dict) -> list[types.TextContent]:
-    #     """Detect green ball using camera and optional 3D validation"""
-        use_3d = args.get('use_3d_validation', True)
-        
-        try:
-            # Get camera image
-            code, data = self.video_client.GetImageSample()
-            if code != 0:
-                return [types.TextContent(
-                    type="text",
-                    text=f"Camera error: {code}"
-                )]
-                
-            image_data = np.frombuffer(bytes(data), dtype=np.uint8)
-            frame = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
-            
-            if frame is None:
-                return [types.TextContent(
-                    type="text",
-                    text="Failed to decode camera image"
-                )]
-            
-            # Ball detection (RGB 90,180,120)
-            target_rgb = np.uint8([[[90, 180, 120]]])
-            target_hsv = cv2.cvtColor(target_rgb, cv2.COLOR_RGB2HSV)[0][0]
-            
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            
-            # HSV range
-            h_tolerance, s_tolerance, v_tolerance = 15, 60, 60
-            hsv_lower = np.array([
-                max(0, target_hsv[0] - h_tolerance),
-                max(0, target_hsv[1] - s_tolerance),
-                max(0, target_hsv[2] - v_tolerance)
-            ])
-            hsv_upper = np.array([
-                min(179, target_hsv[0] + h_tolerance),
-                min(255, target_hsv[1] + s_tolerance),
-                min(255, target_hsv[2] + v_tolerance)
-            ])
-            
-            mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
-            
-            # Clean mask
-            kernel = np.ones((5, 5), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-            
-            # Find contours
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            if not contours:
-                return [types.TextContent(
-                    type="text",
-                    text="No green ball detected in camera view."
-                )]
-            
-            # Find largest contour
-            largest_contour = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(largest_contour)
-            
-            if area < 200:
-                return [types.TextContent(
-                    type="text",
-                    text="Green object detected but too small to be the ball."
-                )]
-            
-            # Get circle
-            (x, y), radius = cv2.minEnclosingCircle(largest_contour)
-            center = (int(x), int(y))
-            
-            if radius < 15:
-                return [types.TextContent(
-                    type="text", 
-                    text="Green object detected but appears too small."
-                )]
-            
-            # Basic validation without 3D for now
-            result = f"""Green Ball Detected:
-Screen Position: ({center[0]}, {center[1]})
-Radius: {radius:.1f} pixels
-Area: {area:.0f} pixels
-Confidence: {'High' if area > 500 and radius > 25 else 'Medium'}"""
-            
-            # Store detection for get_ball_position
-            # For now, estimate 3D position using simple camera model
-            if self.has_pose_data:
-                # Simple distance estimation
-                estimated_distance = (self.ball_diameter * 400) / (radius * 2)  # Rough estimate
-                estimated_distance = max(0.5, min(estimated_distance, 10.0))
-                
-                # Calculate world position (simplified)
-                angle_h = (center[0] - frame.shape[1]/2) / (frame.shape[1]/2) * 35 * math.pi / 180  # 35° half FOV
-                
-                rel_x = estimated_distance * math.cos(angle_h)
-                rel_y = estimated_distance * math.sin(angle_h)
-                
-                world_x = self.robot_x + rel_x * math.cos(self.robot_yaw) - rel_y * math.sin(self.robot_yaw)
-                world_y = self.robot_y + rel_x * math.sin(self.robot_yaw) + rel_y * math.cos(self.robot_yaw)
-                world_z = self.robot_z  # Assume ball on ground
-                
-                self.current_ball_position = (world_x, world_y, world_z)
-                
-                result += f"\nEstimated 3D Position: ({world_x:.2f}, {world_y:.2f}, {world_z:.2f})"
-                result += f"\nDistance: {estimated_distance:.2f}m"
-            
-            return [types.TextContent(
-                type="text",
-                text=result
-            )]
-            
-        except Exception as e:
-            return [types.TextContent(
-                type="text",
-                text=f"Ball detection failed: {str(e)}"
-            )]
-    
-    # async def _get_ball_position(self, args: dict) -> list[types.TextContent]:
-    #     """Get current ball position"""
-        if self.current_ball_position is None:
-            return [types.TextContent(
-                type="text",
-                text="No ball position available. Run detect_green_ball first."
-            )]
-        
-        x, y, z = self.current_ball_position
-        if self.has_pose_data:
-            distance = math.sqrt((x - self.robot_x)**2 + (y - self.robot_y)**2)
-            angle = math.atan2(y - self.robot_y, x - self.robot_x)
-            relative_angle = angle - self.robot_yaw
-            
-            return [types.TextContent(
-                type="text",
-                text=f"""Ball Position:
-World Coordinates: ({x:.2f}, {y:.2f}, {z:.2f})
-Distance from Robot: {distance:.2f}m  
-Relative Angle: {math.degrees(relative_angle):.1f}° (0° = straight ahead)
-Direction: {math.degrees(angle):.1f}° from world east"""
-            )]
-        else:
-            return [types.TextContent(
-                type="text",
-                text=f"Ball Position: ({x:.2f}, {y:.2f}, {z:.2f})"
-            )]
-    
     async def _get_robot_status(self, args: dict) -> list[types.TextContent]:
         """Get comprehensive robot status"""
-        status = "=== Unitree Go2 Robot Status ===\n\n"
+        status = "=== Unitree Go2 Robot Status (Minimal) ===\n\n"
         
         # Pose data
         if self.has_pose_data:
@@ -809,22 +473,10 @@ Direction: {math.degrees(angle):.1f}° from world east"""
         except:
             status += "Camera: ❌ Connection failed\n"
         
-        # Point cloud status
-        if self.has_pointcloud:
-            msg = self.latest_pointcloud
-            status += f"Lidar: ✅ Active ({msg.width} points, {msg.height}x{msg.width} resolution)\n"
-        else:
-            status += "Lidar: ❌ No point cloud data\n"
-        
         # Movement status
         status += f"Movement: {'✅ Standing (can move)' if self.is_standing else '⚠️  Lying down (use robot_stand_up)'}\n"
         
-        # Ball detection status (COMMENTED OUT)
-        # if self.current_ball_position:
-        #     x, y, z = self.current_ball_position
-        #     status += f"Ball Detection: ✅ Ball at ({x:.2f}, {y:.2f}, {z:.2f})\n"
-        # else:
-        #     status += "Ball Detection: ❌ No ball detected\n"
+        status += "\nAvailable Tools: capture_image, get_robot_pose, robot_move, robot_stop\n"
         
         return [types.TextContent(
             type="text",
@@ -838,7 +490,7 @@ Direction: {math.degrees(angle):.1f}° from world east"""
                 read_stream,
                 write_stream,
                 InitializationOptions(
-                    server_name="unitree-go2-robot",
+                    server_name="unitree-go2-robot-minimal",
                     server_version="1.0.0",
                     capabilities=self.server.get_capabilities(
                         notification_options=NotificationOptions(),
@@ -851,11 +503,12 @@ async def main():
     import sys
     network_interface = sys.argv[1] if len(sys.argv) > 1 else None
     
-    print(f"Starting Unitree Go2 MCP Server...")
+    print(f"Starting Minimal Unitree Go2 MCP Server...")
+    print("Features: Camera, Position, Movement (No Lidar)")
     if network_interface:
         print(f"Using network interface: {network_interface}")
     
-    server = RobotMCPServer(network_interface)
+    server = MinimalRobotMCPServer(network_interface)
     await server.run()
 
 if __name__ == "__main__":

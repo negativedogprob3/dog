@@ -8,6 +8,8 @@ from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from unitree_sdk2py.idl.default import std_msgs_msg_dds__String_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LidarState_, LowState_, SportModeState_
 from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
+from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
+from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import PoseStamped_
 
 class LidarDebugger:
     def __init__(self):
@@ -58,6 +60,19 @@ class LidarDebugger:
             ("rt/lowstate", LowState_),
             ("rt/sportmodestate", SportModeState_),
             
+            # Odometry topics from RTC_TOPIC list
+            ("rt/utlidar/robot_pose", PoseStamped_),  # ROBOTODOM
+            ("rt/lio_sam_ros2/mapping/odometry", Odometry_),  # SLAM_ODOMETRY
+            ("rt/utlidar/robot_pose", Odometry_),  # Try both message types
+            ("rt/lio_sam_ros2/mapping/odometry", PoseStamped_),  # Try both message types
+            
+            # Additional odometry variations
+            ("rt/odometry", Odometry_),
+            ("rt/robot_pose", PoseStamped_),
+            ("rt/slam/odometry", Odometry_),
+            ("rt/lidar/odometry", Odometry_),
+            ("rt/utlidar/odometry", Odometry_),
+            
             # Generic data topics
             ("rt/data/lidar", LidarState_),
             ("rt/data/utlidar", LidarState_),
@@ -78,25 +93,81 @@ class LidarDebugger:
                 print(f"\n🎉 FIRST MESSAGE RECEIVED from {topic_name}!")
                 print(f"Message type: {type(msg).__name__}")
                 self.print_message_details(msg, topic_name)
+            
+            # Print ALL odometry data as it comes in
+            elif self.is_odometry_topic(topic_name):
+                if self.message_counts[topic_name] % 10 == 0:  # Print every 10th message to avoid spam
+                    print(f"\n📍 ODOMETRY UPDATE #{self.message_counts[topic_name]} from {topic_name}:")
+                    self.print_odometry_data_only(msg, topic_name)
         
         return handler
+    
+    def is_odometry_topic(self, topic_name):
+        """Check if this is an odometry-related topic"""
+        odometry_keywords = ['robot_pose', 'odometry', 'pose', 'slam']
+        return any(keyword in topic_name.lower() for keyword in odometry_keywords)
+    
+    def print_odometry_data_only(self, msg, topic_name):
+        """Print just the key odometry data without all the details"""
+        try:
+            if hasattr(msg, 'pose') and hasattr(msg, 'twist'):
+                # Odometry message
+                pos = msg.pose.pose.position
+                orient = msg.pose.pose.orientation
+                linear = msg.twist.twist.linear
+                print(f"  🌍 Pos: ({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f}) | 🏃 Vel: ({linear.x:.3f}, {linear.y:.3f}, {linear.z:.3f})")
+                
+            elif hasattr(msg, 'pose') and hasattr(msg.pose, 'position'):
+                # PoseStamped message  
+                pos = msg.pose.position
+                orient = msg.pose.orientation
+                print(f"  🌍 Pos: ({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f}) | 🧭 Quat: ({orient.x:.3f}, {orient.y:.3f}, {orient.z:.3f}, {orient.w:.3f})")
+                
+        except Exception as e:
+            print(f"❌ Error printing odometry data: {e}")
     
     def print_message_details(self, msg, topic_name):
         """Print details about the received message"""
         try:
-            if hasattr(msg, '__dict__'):
-                print(f"Message attributes for {topic_name}:")
-                for attr, value in msg.__dict__.items():
-                    if isinstance(value, (int, float, str, bool)):
-                        print(f"  {attr}: {value}")
-                    elif isinstance(value, list) and len(value) < 10:
-                        print(f"  {attr}: {value}")
-                    elif isinstance(value, list):
-                        print(f"  {attr}: [list with {len(value)} items]")
-                    else:
-                        print(f"  {attr}: {type(value).__name__}")
+            print(f"📊 Message details for {topic_name} ({type(msg).__name__}):")
+            
+            # Special handling for odometry messages
+            if hasattr(msg, 'pose') and hasattr(msg, 'twist'):
+                # Odometry message
+                pos = msg.pose.pose.position
+                orient = msg.pose.pose.orientation
+                linear = msg.twist.twist.linear
+                angular = msg.twist.twist.angular
+                print(f"  🌍 Position: x={pos.x:.3f}, y={pos.y:.3f}, z={pos.z:.3f}")
+                print(f"  🧭 Orientation: x={orient.x:.3f}, y={orient.y:.3f}, z={orient.z:.3f}, w={orient.w:.3f}")
+                print(f"  🏃 Linear Vel: x={linear.x:.3f}, y={linear.y:.3f}, z={linear.z:.3f}")
+                print(f"  🔄 Angular Vel: x={angular.x:.3f}, y={angular.y:.3f}, z={angular.z:.3f}")
+                
+            elif hasattr(msg, 'pose') and hasattr(msg.pose, 'position'):
+                # PoseStamped message
+                pos = msg.pose.position
+                orient = msg.pose.orientation
+                print(f"  🌍 Position: x={pos.x:.3f}, y={pos.y:.3f}, z={pos.z:.3f}")
+                print(f"  🧭 Orientation: x={orient.x:.3f}, y={orient.y:.3f}, z={orient.z:.3f}, w={orient.w:.3f}")
+                if hasattr(msg, 'header'):
+                    print(f"  ⏰ Timestamp: {msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}")
+                    print(f"  🏷️  Frame ID: {msg.header.frame_id}")
+                    
+            else:
+                # Generic message handling
+                if hasattr(msg, '__dict__'):
+                    for attr, value in msg.__dict__.items():
+                        if isinstance(value, (int, float, str, bool)):
+                            print(f"  {attr}: {value}")
+                        elif isinstance(value, list) and len(value) < 10:
+                            print(f"  {attr}: {value}")
+                        elif isinstance(value, list):
+                            print(f"  {attr}: [list with {len(value)} items]")
+                        else:
+                            print(f"  {attr}: {type(value).__name__}")
+                            
         except Exception as e:
-            print(f"Error printing message details: {e}")
+            print(f"❌ Error printing message details: {e}")
     
     def setup_all_subscribers(self):
         """Try to subscribe to all possible topics"""

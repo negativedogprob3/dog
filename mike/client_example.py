@@ -59,27 +59,19 @@ class DogClient:
         self.connected = False
         
     async def connect(self):
-        """Connect to the server with retry logic"""
-        max_retries = 6  # 30 seconds / 5 seconds per retry
-        retry_delay = 5  # seconds
-        
-        for attempt in range(max_retries):
-            try:
-                self.websocket = await websockets.connect(
-                    self.server_url,
-                    ping_interval=30,  # Send ping every 30 seconds
-                    ping_timeout=10    # Wait 10 seconds for pong
-                )
-                self.connected = True
-                print(f"✅ Connected to {self.server_url}")
-                return True
-            except Exception as e:
-                if attempt < max_retries - 1:  # Not the last attempt
-                    print(f"\r🔄 Connection attempt {attempt + 1}/{max_retries} failed, retrying in {retry_delay}s...\r")
-                    await asyncio.sleep(retry_delay)
-                else:  # Last attempt failed
-                    print(f"\r❌ Connection failed after {max_retries} attempts: {e}\r")
-                    return False
+        """Connect to the server"""
+        try:
+            self.websocket = await websockets.connect(
+                self.server_url,
+                ping_interval=30,  # Send ping every 30 seconds
+                ping_timeout=10    # Wait 10 seconds for pong
+            )
+            self.connected = True
+            print(f"✅ Connected to {self.server_url}")
+            return True
+        except Exception as e:
+            print(f"❌ Connection failed: {e}")
+            return False
     
     async def send_command(self, velocity_x: float = 0, velocity_y: float = 0, 
                           angular_velocity: float = 0, mode: str = "walk"):
@@ -103,7 +95,7 @@ class DogClient:
             result = json.loads(response)
             return result.get("success", False)
         except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedError):
-            print("\r🔄 Connection lost, attempting reconnect...\r")
+            print("\r🔄 Connection lost, attempting reconnect...")
             self.connected = False
             if await self.connect():
                 # Retry the command
@@ -116,7 +108,7 @@ class DogClient:
                     return False
             return False
         except Exception as e:
-            print(f"\r❌ Command failed: {e}\r")
+            print(f"\r❌ Command failed: {e}")
             return False
     
     async def get_state(self):
@@ -163,7 +155,7 @@ class DogClient:
         if self.websocket:
             await self.websocket.close()
             self.connected = False
-            print("\r🔌 Explicitly disconnected from server\r")
+            print("🔌 Disconnected")
 
 
 async def wasd_control():

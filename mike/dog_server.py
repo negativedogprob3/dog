@@ -219,7 +219,7 @@ class Go2RobotController:
             self.state.connected = robot_reachable
             
             if connected_components:
-                self.log_green(f"✅ Connected: {' + '.join(connected_components)}")
+                logging.info(f"✅ Connected: {' + '.join(connected_components)}")
                 return True
             else:
                 # Build failure message with details
@@ -395,7 +395,7 @@ class DogServer:
                 await self.handle_websocket_message(websocket, client_id, message)
                 
         except websockets.exceptions.ConnectionClosed:
-            print(f"{time.strftime('%H:%M:%S')} - ⛓️‍💥  Client disconnected: {client_id}")
+            print(f"{time.strftime('%H:%M:%S')} - 🔗💥 Client disconnected: {client_id}")
         except Exception as e:
             logging.error(f"❌ Client error {client_id}: {e}")
         finally:
@@ -412,24 +412,23 @@ class DogServer:
                 cmd_data = data.get("data", {})
                 command = MovementCommand(**cmd_data)
                 
-                # Log the received command with emoji
-                client_ip = client_id.split(':')[0]  # Extract just the IP part
+                # Log the received command in human-readable format
                 if command.velocity_x > 0:
-                    print(f"{time.strftime('%H:%M:%S')} - ⬆️  Forward from {client_ip}")
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to move forward")
                 elif command.velocity_x < 0:
-                    print(f"{time.strftime('%H:%M:%S')} - ⬇️  Backward from {client_ip}")
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to move backward")
                 elif command.velocity_y < 0:
-                    print(f"{time.strftime('%H:%M:%S')} - ⬅️  Left from {client_ip}")
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to move left")
                 elif command.velocity_y > 0:
-                    print(f"{time.strftime('%H:%M:%S')} - ➡️  Right from {client_ip}")
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to move right")
                 elif command.angular_velocity < 0:
-                    print(f"{time.strftime('%H:%M:%S')} - ↪️  Turn left from {client_ip}")
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to turn left")
                 elif command.angular_velocity > 0:
-                    print(f"{time.strftime('%H:%M:%S')} - ↩️  Turn right from {client_ip}")
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to turn right")
                 elif command.mode != "walk":
-                    print(f"{time.strftime('%H:%M:%S')} - 🎮  {command.mode} from {client_ip}")
+                    print(f"{time.strftime('%H:%M:%S')} - 🎮 Received command to {command.mode}")
                 else:
-                    print(f"{time.strftime('%H:%M:%S')} - 🛑  Stop from {client_ip}")
+                    print(f"{time.strftime('%H:%M:%S')} - 🛑 Received stop command")
                 
                 success = self.robot.execute_command(command)
                 
@@ -498,15 +497,14 @@ class DogServer:
         while self.running:
             try:
                 self.robot.update_state()
-                if self.connected_clients:  # Only broadcast if there are clients
-                    await self.broadcast_message({
-                        "type": "state_update",
-                        "data": asdict(self.robot.state)
-                    })
-                await asyncio.sleep(1.0)  # Reduce to 1Hz to avoid overwhelming clients
+                await self.broadcast_message({
+                    "type": "state_update",
+                    "data": asdict(self.robot.state)
+                })
+                await asyncio.sleep(0.1)  # 10Hz updates
                 
             except Exception as e:
-                logging.error(f"❌ State broadcast error: {e}")
+                logging.error(f"State broadcast error: {e}")
                 await asyncio.sleep(1)
     
     def create_http_handler(self):

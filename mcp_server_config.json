@@ -1,0 +1,128 @@
+{
+  "name": "unitree-go2-robot",
+  "description": "MCP Server for Unitree Go2 Robot Control",
+  "version": "1.0.0",
+  "author": "Claude Code",
+  "license": "MIT",
+  "main": "mcp_robot_server.py",
+  "dependencies": {
+    "mcp": ">=1.0.0",
+    "opencv-python": ">=4.5.0",
+    "numpy": ">=1.20.0",
+    "unitree_sdk2py": ">=1.0.0"
+  },
+  "configuration": {
+    "network_interface": {
+      "type": "string",
+      "description": "Network interface to connect to robot (e.g. 'en8')",
+      "required": false,
+      "default": null
+    }
+  },
+  "tools": [
+    {
+      "name": "capture_image",
+      "category": "camera",
+      "description": "Capture image from robot's front camera with optional saving"
+    },
+    {
+      "name": "get_robot_pose", 
+      "category": "navigation",
+      "description": "Get current robot position and orientation in 3D space"
+    },
+    {
+      "name": "get_robot_position_map",
+      "category": "navigation", 
+      "description": "Get robot position on SLAM map with coordinate system details"
+    },
+    {
+      "name": "robot_stand_up",
+      "category": "movement",
+      "description": "Command robot to stand up from lying position"
+    },
+    {
+      "name": "robot_stand_down",
+      "category": "movement",
+      "description": "Command robot to lie down from standing position"
+    },
+    {
+      "name": "robot_move",
+      "category": "movement",
+      "description": "Move robot with specified velocities for a duration"
+    },
+    {
+      "name": "robot_stop", 
+      "category": "movement",
+      "description": "Immediately stop all robot movement"
+    },
+    {
+      "name": "enable_lidar",
+      "category": "sensors",
+      "description": "Enable the robot's lidar sensor for point cloud data"
+    },
+    {
+      "name": "disable_lidar",
+      "category": "sensors", 
+      "description": "Disable the robot's lidar sensor"
+    },
+    {
+      "name": "get_point_cloud_data",
+      "category": "sensors",
+      "description": "Get current lidar point cloud data with filtering options"
+    },
+    {
+      "name": "detect_green_ball",
+      "category": "perception",
+      "description": "Detect and localize green ball (RGB 90,180,120) using camera + lidar"
+    },
+    {
+      "name": "get_ball_position", 
+      "category": "perception",
+      "description": "Get current detected ball position in world coordinates"
+    },
+    {
+      "name": "get_robot_status",
+      "category": "system",
+      "description": "Get comprehensive robot status including all sensors and capabilities"
+    }
+  ],
+  "capabilities": {
+    "camera": {
+      "resolution": "640x480",
+      "format": "MJPEG",
+      "features": ["real-time capture", "image save", "base64 encoding"]
+    },
+    "navigation": {
+      "positioning": "SLAM + Lidar odometry",
+      "coordinate_system": "World frame (meters)",
+      "accuracy": "Centimeter-level"
+    },
+    "movement": {
+      "max_linear_speed": "3.0 m/s",
+      "max_lateral_speed": "2.0 m/s", 
+      "max_angular_speed": "4.0 rad/s",
+      "safety_features": ["auto-stop", "speed limits", "standing requirement"]
+    },
+    "sensors": {
+      "lidar": {
+        "type": "360° scanning",
+        "range": "0.1-15m",
+        "points_per_scan": "~4000",
+        "frequency": "~5Hz"
+      }
+    },
+    "perception": {
+      "ball_detection": {
+        "color_target": "RGB(90,180,120)",
+        "size_target": "50cm diameter",
+        "validation": "3D point cloud + size verification"
+      }
+    }
+  },
+  "connection": {
+    "robot_ip": "192.168.123.18",
+    "pc_ip": "192.168.123.51/24",
+    "connection_type": "Ethernet",
+    "protocol": "DDS (Data Distribution Service)"
+  }
+}

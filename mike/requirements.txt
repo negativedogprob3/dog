@@ -2,3 +2,5 @@ opencv-python>=4.8.0
 numpy>=1.21.0
 websockets>=12.0
 asyncio
+# Unitree SDK - install manually if connecting to real robot:
+# python3 -m pip install unitree_sdk2py

@@ -19,7 +19,7 @@ import tty
 import termios
 
 # Default server IP - change this if your server is on a different machine
-DEFAULT_SERVER_IP = "192.168.2.147"
+DEFAULT_SERVER_IP = "192.168.2.143"
 
 class NonBlockingInput:
     """Cross-platform non-blocking keyboard input"""

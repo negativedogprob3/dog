@@ -37,15 +37,18 @@ import socket
 import subprocess
 import platform
 
-# Try to import Unitree SDK (mock if not available)
+# Try to import Unitree SDK
 try:
-    # These would be the actual SDK imports
-    # from unitree_sdk2_python.core.channel import ChannelFactoryInitialize
-    # from unitree_sdk2_python.idl.default import unitree_go_msg_dds__SportModeCmd_
-    # from unitree_sdk2_python.idl.unitree_go.msg.dds_ import SportModeState_
-    SDK_AVAILABLE = False  # Set to False for now since SDK may not be installed
-except ImportError:
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+    from unitree_sdk2py.go2.video.video_client import VideoClient
+    from unitree_sdk2py.go2.sport.sport_client import SportClient
+    from unitree_sdk2py.idl.default import unitree_go_msg_dds__SportModeCmd_
+    from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+    SDK_AVAILABLE = True
+    print("✅ Unitree SDK loaded successfully")
+except ImportError as e:
     SDK_AVAILABLE = False
+    print(f"⚠️ Unitree SDK not available: {e}")
 
 def get_local_ip() -> str:
     """Get the local IP address that can be reached by other computers"""
@@ -172,7 +175,8 @@ class Go2RobotController:
             connected=False,
             timestamp=time.time()
         )
-        self.camera = None
+        self.video_client = None
+        self.sport_client = None
         self.last_command_time = 0
         self.safety_timeout = 2.0  # Stop if no commands for 2 seconds
         
@@ -185,31 +189,58 @@ class Go2RobotController:
             import subprocess
             import platform
             
-            go2_ip = "192.168.12.1"
-            if platform.system() == "Darwin":
-                ping_result = subprocess.run(
-                    ["ping", "-c", "1", "-W", "1000", go2_ip], 
-                    capture_output=True, timeout=3
-                )
-            else:
-                ping_result = subprocess.run(
-                    ["ping", "-c", "1", "-W", "1", go2_ip], 
-                    capture_output=True, timeout=3
-                )
+            # Try both common IP configurations for Go2
+            go2_ips = ["192.168.12.1", "192.168.123.18"]
+            robot_reachable = False
             
-            robot_reachable = ping_result.returncode == 0
+            for go2_ip in go2_ips:
+                try:
+                    if platform.system() == "Darwin":
+                        ping_result = subprocess.run(
+                            ["ping", "-c", "1", "-W", "1000", go2_ip], 
+                            capture_output=True, timeout=3
+                        )
+                    else:
+                        ping_result = subprocess.run(
+                            ["ping", "-c", "1", "-W", "1", go2_ip], 
+                            capture_output=True, timeout=3
+                        )
+                    
+                    if ping_result.returncode == 0:
+                        robot_reachable = True
+                        logging.info(f"🌐 Robot found at {go2_ip}")
+                        break
+                except subprocess.TimeoutExpired:
+                    continue
+                except Exception:
+                    continue
             
             # Try SDK connection if available
             if SDK_AVAILABLE and robot_reachable:
-                # Initialize actual SDK connection
-                # ChannelFactoryInitialize(0, interface)
-                # self.sport_client = SportClient()
-                connected_components.append("🤖 Control API")
+                try:
+                    # Initialize actual SDK connection
+                    ChannelFactoryInitialize(0, interface)
+                    
+                    # Setup sport client for movement
+                    self.sport_client = SportClient()
+                    self.sport_client.SetTimeout(3.0)
+                    self.sport_client.Init()
+                    connected_components.append("🤖 Control API")
+                    
+                    # Setup camera client
+                    self.video_client = VideoClient()
+                    self.video_client.SetTimeout(3.0)
+                    self.video_client.Init()
+                    connected_components.append("📹 Camera")
+                    
+                except Exception as e:
+                    logging.warning(f"⚠️ SDK setup failed: {e}")
             
-            # Try to connect to camera
-            self.camera = self._setup_camera(interface)
-            if self.camera:
-                connected_components.append("📹 Camera")
+            # Fallback to GStreamer camera if SDK camera failed
+            if not self.video_client:
+                self.camera = self._setup_camera(interface)
+                if self.camera:
+                    connected_components.append("📹 Camera (GStreamer)")
             
             if robot_reachable:
                 connected_components.append("🌐 Network")
@@ -259,7 +290,7 @@ class Go2RobotController:
         
         try:
             # Log what we're sending to the robot
-            if SDK_AVAILABLE and self.connected:
+            if self.sport_client and self.connected:
                 scaled_vx = cmd.velocity_x * 1.5
                 scaled_vy = cmd.velocity_y * 1.0
                 scaled_vyaw = cmd.angular_velocity * 1.5
@@ -267,12 +298,12 @@ class Go2RobotController:
                 print(f"{time.strftime('%H:%M:%S')} - 🤖 Sending to robot: vx={scaled_vx:.1f}, vy={scaled_vy:.1f}, vyaw={scaled_vyaw:.1f}")
                 
                 # Send actual command to robot via SDK
-                # sport_req = unitree_go_msg_dds__SportModeCmd_()
-                # sport_req.vx = scaled_vx
-                # sport_req.vy = scaled_vy
-                # sport_req.vyaw = scaled_vyaw
-                # sport_req.body_height = cmd.body_height
-                # self.sport_client.Move(sport_req)
+                sport_req = unitree_go_msg_dds__SportModeCmd_()
+                sport_req.vx = scaled_vx
+                sport_req.vy = scaled_vy
+                sport_req.vyaw = scaled_vyaw
+                sport_req.body_height = cmd.body_height
+                self.sport_client.Move(sport_req)
             else:
                 # Show what we would send if connected
                 scaled_vx = cmd.velocity_x * 1.5
@@ -295,11 +326,24 @@ class Go2RobotController:
     
     def get_camera_frame(self) -> Optional[np.ndarray]:
         """Get current camera frame"""
-        if self.camera is None:
-            return None
+        # Try SDK camera first
+        if self.video_client:
+            try:
+                code, data = self.video_client.GetImageSample()
+                if code == 0:
+                    # Convert to numpy image
+                    image_data = np.frombuffer(bytes(data), dtype=np.uint8)
+                    frame = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+                    return frame
+            except Exception as e:
+                logging.warning(f"⚠️ SDK camera error: {e}")
         
-        ret, frame = self.camera.read()
-        return frame if ret else None
+        # Fallback to GStreamer camera
+        if hasattr(self, 'camera') and self.camera is not None:
+            ret, frame = self.camera.read()
+            return frame if ret else None
+            
+        return None
     
     def emergency_stop(self):
         """Emergency stop the robot"""
@@ -318,11 +362,19 @@ class Go2RobotController:
                 self.emergency_stop()
                 self.state.mode = "idle"
         
-        # In real implementation, read from actual sensors
-        if SDK_AVAILABLE:
-            # state = self.sport_client.GetState()
-            # Update self.state from actual robot data
-            pass
+        # Read from actual sensors if connected
+        if self.sport_client:
+            try:
+                robot_state = self.sport_client.GetState()
+                # Update state with real robot data
+                self.state.battery_level = robot_state.battery_percentage if hasattr(robot_state, 'battery_percentage') else 100.0
+                self.state.position["x"] = robot_state.position[0] if hasattr(robot_state, 'position') else 0
+                self.state.position["y"] = robot_state.position[1] if hasattr(robot_state, 'position') else 0
+                self.state.position["z"] = robot_state.position[2] if hasattr(robot_state, 'position') else 0
+                # Add more state updates as needed
+            except Exception as e:
+                logging.warning(f"⚠️ State update failed: {e}")
+                pass
         
         self.state.timestamp = time.time()
 

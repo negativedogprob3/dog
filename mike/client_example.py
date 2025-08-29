@@ -13,73 +13,25 @@ import cv2
 import base64
 import numpy as np
 from typing import Optional
-import sys
-import select
-import tty
-import termios
-
-# Default server IP - change this if your server is on a different machine
-DEFAULT_SERVER_IP = "192.168.2.147"
-
-class NonBlockingInput:
-    """Cross-platform non-blocking keyboard input"""
-    
-    def __init__(self):
-        if sys.platform == 'win32':
-            import msvcrt
-            self.msvcrt = msvcrt
-            self.is_windows = True
-        else:
-            self.is_windows = False
-            self.old_settings = termios.tcgetattr(sys.stdin)
-            tty.setraw(sys.stdin.fileno())
-    
-    def get_key(self):
-        """Get a key press without blocking"""
-        if self.is_windows:
-            if self.msvcrt.kbhit():
-                return self.msvcrt.getch().decode('utf-8')
-            return None
-        else:
-            if select.select([sys.stdin], [], [], 0.1)[0]:
-                return sys.stdin.read(1)
-            return None
-    
-    def restore(self):
-        """Restore terminal settings"""
-        if not self.is_windows:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
 
 class DogClient:
     """Client for connecting to dog server"""
     
-    def __init__(self, server_url: str):
+    def __init__(self, server_url: str = "ws://192.168.12.1:8080"):
         self.server_url = server_url
         self.websocket = None
         self.connected = False
         
     async def connect(self):
-        """Connect to the server with retry logic"""
-        max_retries = 6  # 30 seconds / 5 seconds per retry
-        retry_delay = 5  # seconds
-        
-        for attempt in range(max_retries):
-            try:
-                self.websocket = await websockets.connect(
-                    self.server_url,
-                    ping_interval=30,  # Send ping every 30 seconds
-                    ping_timeout=10    # Wait 10 seconds for pong
-                )
-                self.connected = True
-                print(f"✅ Connected to {self.server_url}")
-                return True
-            except Exception as e:
-                if attempt < max_retries - 1:  # Not the last attempt
-                    print(f"\r🔄 Connection attempt {attempt + 1}/{max_retries} failed, retrying in {retry_delay}s...\r")
-                    await asyncio.sleep(retry_delay)
-                else:  # Last attempt failed
-                    print(f"\r❌ Connection failed after {max_retries} attempts: {e}\r")
-                    return False
+        """Connect to the server"""
+        try:
+            self.websocket = await websockets.connect(self.server_url)
+            self.connected = True
+            print(f"✅ Connected to {self.server_url}")
+            return True
+        except Exception as e:
+            print(f"❌ Connection failed: {e}")
+            return False
     
     async def send_command(self, velocity_x: float = 0, velocity_y: float = 0, 
                           angular_velocity: float = 0, mode: str = "walk"):
@@ -97,27 +49,11 @@ class DogClient:
             }
         }
         
-        try:
-            await self.websocket.send(json.dumps(command))
-            response = await self.websocket.recv()
-            result = json.loads(response)
-            return result.get("success", False)
-        except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedError):
-            print("\r🔄 Connection lost, attempting reconnect...\r")
-            self.connected = False
-            if await self.connect():
-                # Retry the command
-                try:
-                    await self.websocket.send(json.dumps(command))
-                    response = await self.websocket.recv()
-                    result = json.loads(response)
-                    return result.get("success", False)
-                except:
-                    return False
-            return False
-        except Exception as e:
-            print(f"\r❌ Command failed: {e}\r")
-            return False
+        await self.websocket.send(json.dumps(command))
+        response = await self.websocket.recv()
+        result = json.loads(response)
+        
+        return result.get("success", False)
     
     async def get_state(self):
         """Get current robot state"""
@@ -163,82 +99,158 @@ class DogClient:
         if self.websocket:
             await self.websocket.close()
             self.connected = False
-            print("\r🔌 Explicitly disconnected from server\r")
+            print("🔌 Disconnected")
 
-
-async def wasd_control():
-    """Real-time WASD robot control"""
-    # Get server IP
-    server_ip = input(f"Enter server IP address (default: {DEFAULT_SERVER_IP}): ").strip()
-    if not server_ip:
-        server_ip = DEFAULT_SERVER_IP
+async def keyboard_control_demo():
+    """Demo with keyboard control"""
+    print("🐕 Dog Client - Keyboard Control Demo")
+    print("=" * 40)
+    print("Controls:")
+    print("  w/s: Forward/Backward")
+    print("  a/d: Left/Right") 
+    print("  q/e: Turn Left/Right")
+    print("  r: Stand up")
+    print("  f: Sit down")
+    print("  SPACE: Stop")
+    print("  ESC: Emergency stop and exit")
+    print("=" * 40)
     
-    server_url = f"ws://{server_ip}:8080"
-    client = DogClient(server_url)
+    client = DogClient()
     
     if not await client.connect():
-        print("❌ Failed to connect to server")
         return
     
-    print("✅ Connected to server")
-    print("\n🎮 WASD Robot Control")
-    print("==================")
-    print("W - Forward")
-    print("S - Backward") 
-    print("A - Left")
-    print("D - Right")
-    print("SPACE - Stop")
-    print("ESC or Ctrl+C - Quit")
-    print("==================")
-    print("Press keys to move...")
+    try:
+        # Note: This is a simplified demo
+        # In practice, you'd want proper keyboard input handling
+        while True:
+            command = input("Enter command (w/s/a/d/q/e/r/f/SPACE/ESC): ").lower().strip()
+            
+            if command == "esc":
+                await client.emergency_stop()
+                break
+            elif command == "w":
+                await client.send_command(velocity_x=0.5)
+                print("Moving forward")
+            elif command == "s":
+                await client.send_command(velocity_x=-0.5)
+                print("Moving backward")
+            elif command == "a":
+                await client.send_command(velocity_y=-0.5)
+                print("Moving left")
+            elif command == "d":
+                await client.send_command(velocity_y=0.5)
+                print("Moving right")
+            elif command == "q":
+                await client.send_command(angular_velocity=-0.5)
+                print("Turning left")
+            elif command == "e":
+                await client.send_command(angular_velocity=0.5)
+                print("Turning right")
+            elif command == "r":
+                await client.send_command(mode="stand")
+                print("Standing up")
+            elif command == "f":
+                await client.send_command(mode="sit")
+                print("Sitting down")
+            elif command == " ":
+                await client.send_command()
+                print("Stopped")
+            else:
+                print("Unknown command")
+            
+            # Get and display state
+            state = await client.get_state()
+            if state:
+                print(f"Robot: {state['mode']} | Battery: {state['battery_level']}%")
     
-    keyboard = NonBlockingInput()
+    finally:
+        await client.disconnect()
+
+async def camera_stream_demo():
+    """Demo showing camera stream"""
+    print("🐕 Dog Client - Camera Stream Demo")
+    print("Press 'q' to quit")
+    
+    client = DogClient()
+    
+    if not await client.connect():
+        return
     
     try:
         while True:
-            try:
-                key = keyboard.get_key()
-                
-                if key:
-                    if key == '\x1b':  # ESC key
-                        print("\n👋 Disconnecting...")
-                        break
-                    elif key == '\x03':  # Ctrl+C
-                        print("\n⚠️ Interrupted by Ctrl+C")
-                        break
-                    elif key.lower() == 'w':
-                        await client.send_command(velocity_x=0.5)
-                        print("⬆️ Moving forward\r")
-                    elif key.lower() == 's':
-                        await client.send_command(velocity_x=-0.5)
-                        print("⬇️ Moving backward\r")
-                    elif key.lower() == 'a':
-                        await client.send_command(velocity_y=-0.5)
-                        print("⬅️ Moving left\r")
-                    elif key.lower() == 'd':
-                        await client.send_command(velocity_y=0.5)
-                        print("➡️ Moving right\r")
-                    elif key == ' ':
-                        await client.send_command()
-                        print("⏹️ Stopped\r")
-                
-                # Small delay to prevent overwhelming the server
-                await asyncio.sleep(0.05)
-                
-            except KeyboardInterrupt:
-                print("\n⚠️ Interrupted by Ctrl+C")
-                break
+            frame = await client.get_camera_frame()
             
-    except KeyboardInterrupt:
-        print("\n⚠️ Interrupted by Ctrl+C")
+            if frame is not None:
+                cv2.imshow("Dog Camera", frame)
+                
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+            else:
+                print("No camera frame available")
+                await asyncio.sleep(0.1)
+    
     finally:
-        keyboard.restore()
+        cv2.destroyAllWindows()
+        await client.disconnect()
+
+async def autonomous_demo():
+    """Demo of autonomous control"""
+    print("🐕 Dog Client - Autonomous Demo")
+    print("Robot will perform a simple sequence")
+    
+    client = DogClient()
+    
+    if not await client.connect():
+        return
+    
+    try:
+        # Simple autonomous sequence
+        commands = [
+            ("Standing up", {"mode": "stand"}),
+            ("Moving forward", {"velocity_x": 0.3}),
+            ("Turning left", {"angular_velocity": -0.5}),
+            ("Moving forward", {"velocity_x": 0.3}),
+            ("Stopping", {"velocity_x": 0, "angular_velocity": 0}),
+            ("Sitting down", {"mode": "sit"})
+        ]
+        
+        for description, cmd in commands:
+            print(f"🤖 {description}...")
+            await client.send_command(**cmd)
+            
+            # Show state
+            state = await client.get_state()
+            if state:
+                print(f"   Status: {state['mode']} | Battery: {state['battery_level']}%")
+            
+            await asyncio.sleep(3)  # Wait between commands
+        
+        print("✅ Sequence complete")
+    
+    finally:
         await client.disconnect()
 
 def main():
-    """Main entry point"""
-    print("🐕 Go2 Dog Client - WASD Control")
-    asyncio.run(wasd_control())
+    """Main demo selector"""
+    print("🐕 Go2 Dog Client Examples")
+    print("=" * 30)
+    print("1. Keyboard Control")
+    print("2. Camera Stream")
+    print("3. Autonomous Demo")
+    print("=" * 30)
+    
+    choice = input("Select demo (1-3): ").strip()
+    
+    if choice == "1":
+        asyncio.run(keyboard_control_demo())
+    elif choice == "2":
+        asyncio.run(camera_stream_demo())
+    elif choice == "3":
+        asyncio.run(autonomous_demo())
+    else:
+        print("Invalid choice")
 
 if __name__ == "__main__":
     main()

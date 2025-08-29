@@ -20,10 +20,10 @@ A comprehensive server system that allows remote computers to connect and contro
 
 ## Quick Start
 
-### 1. Install Dependencies & Start Server
+### 1. Start the Server (on robot-connected machine)
 ```bash
 cd mike
-python3 -m pip install -r requirements.txt
+python3 -m pip install websockets
 python3 dog_server.py --interface eth0
 ```
 

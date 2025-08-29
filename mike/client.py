@@ -19,7 +19,13 @@ import tty
 import termios
 
 # Default server IP - change this if your server is on a different machine
-DEFAULT_SERVER_IP = "192.168.2.147"
+DEFAULT_SERVER_IP = "192.168.2.143"
+
+def print_r(message):
+    """Print message with \r to prevent terminal stair-stepping in raw mode"""
+    # Replace all \n with \r\n to prevent stair-stepping
+    formatted_message = message.replace('\n', '\r\n')
+    print(f"{formatted_message}\r")
 
 class NonBlockingInput:
     """Cross-platform non-blocking keyboard input"""
@@ -67,10 +73,10 @@ class DogClient:
                 ping_timeout=10    # Wait 10 seconds for pong
             )
             self.connected = True
-            print(f"✅ Connected to {self.server_url}")
+            print_r(f"✅ Connected to {self.server_url}")
             return True
         except Exception as e:
-            print(f"❌ Connection failed: {e}")
+            print_r(f"❌ Connection failed: {e}")
             return False
     
     async def send_command(self, velocity_x: float = 0, velocity_y: float = 0, 
@@ -95,7 +101,7 @@ class DogClient:
             result = json.loads(response)
             return result.get("success", False)
         except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedError):
-            print("\r🔄 Connection lost, attempting reconnect...")
+            print_r("🔄 Connection lost, attempting reconnect...")
             self.connected = False
             if await self.connect():
                 # Retry the command
@@ -108,7 +114,7 @@ class DogClient:
                     return False
             return False
         except Exception as e:
-            print(f"\r❌ Command failed: {e}")
+            print_r(f"❌ Command failed: {e}")
             return False
     
     async def get_state(self):
@@ -147,7 +153,7 @@ class DogClient:
             return False
             
         await self.websocket.send(json.dumps({"type": "emergency_stop"}))
-        print("🛑 Emergency stop sent")
+        print_r("🛑 Emergency stop sent")
         return True
     
     async def disconnect(self):
@@ -155,7 +161,7 @@ class DogClient:
         if self.websocket:
             await self.websocket.close()
             self.connected = False
-            print("🔌 Disconnected")
+            print_r("🔌 Disconnected")
 
 
 async def wasd_control():
@@ -169,20 +175,20 @@ async def wasd_control():
     client = DogClient(server_url)
     
     if not await client.connect():
-        print("❌ Failed to connect to server")
+        print_r("❌ Failed to connect to server")
         return
     
-    print("✅ Connected to server")
-    print("\n🎮 WASD Robot Control")
-    print("==================")
-    print("W - Forward")
-    print("S - Backward") 
-    print("A - Left")
-    print("D - Right")
-    print("SPACE - Stop")
-    print("ESC or Ctrl+C - Quit")
-    print("==================")
-    print("Press keys to move...")
+    print_r("✅ Connected to server")
+    print_r("\n🎮 WASD Robot Control")
+    print_r("==================")
+    print_r("W - Forward")
+    print_r("S - Backward") 
+    print_r("A - Left")
+    print_r("D - Right")
+    print_r("SPACE - Stop")
+    print_r("ESC or Ctrl+C - Quit")
+    print_r("==================")
+    print_r("Press keys to move...")
     
     keyboard = NonBlockingInput()
     
@@ -193,43 +199,43 @@ async def wasd_control():
                 
                 if key:
                     if key == '\x1b':  # ESC key
-                        print("\n👋 Disconnecting...")
+                        print_r("\n👋 Disconnecting...")
                         break
                     elif key == '\x03':  # Ctrl+C
-                        print("\n⚠️ Interrupted by Ctrl+C")
+                        print_r("\n⚠️ Interrupted by Ctrl+C")
                         break
                     elif key.lower() == 'w':
                         await client.send_command(velocity_x=0.5)
-                        print("⬆️ Moving forward\r")
+                        print_r("⬆️ Moving forward")
                     elif key.lower() == 's':
                         await client.send_command(velocity_x=-0.5)
-                        print("⬇️ Moving backward\r")
+                        print_r("⬇️ Moving backward")
                     elif key.lower() == 'a':
                         await client.send_command(velocity_y=-0.5)
-                        print("⬅️ Moving left\r")
+                        print_r("⬅️ Moving left")
                     elif key.lower() == 'd':
                         await client.send_command(velocity_y=0.5)
-                        print("➡️ Moving right\r")
+                        print_r("➡️ Moving right")
                     elif key == ' ':
                         await client.send_command()
-                        print("⏹️ Stopped\r")
+                        print_r("⏹️ Stopped")
                 
                 # Small delay to prevent overwhelming the server
                 await asyncio.sleep(0.05)
                 
             except KeyboardInterrupt:
-                print("\n⚠️ Interrupted by Ctrl+C")
+                print_r("\n⚠️ Interrupted by Ctrl+C")
                 break
             
     except KeyboardInterrupt:
-        print("\n⚠️ Interrupted by Ctrl+C")
+        print_r("\n⚠️ Interrupted by Ctrl+C")
     finally:
         keyboard.restore()
         await client.disconnect()
 
 def main():
     """Main entry point"""
-    print("🐕 Go2 Dog Client - WASD Control")
+    print_r("🐕 Go2 Dog Client - WASD Control")
     asyncio.run(wasd_control())
 
 if __name__ == "__main__":

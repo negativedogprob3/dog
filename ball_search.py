@@ -70,7 +70,7 @@ class BallSearchRobot:
         # Movement parameters
         self.turn_speed = 0.8  # rad/s - slower turning speed for better detection
         self.walk_speed = 0.4  # m/s - slower forward walking speed
-        self.approach_min_distance = 0.5  # meters - stop when this close to ball
+        self.approach_min_distance = 0.8  # meters - stop farther to avoid pushing ball
         
         # Camera parameters
         self.camera_fov_horizontal = 70.0  # degrees
@@ -440,6 +440,28 @@ class BallSearchRobot:
         
         return behind_x, behind_y
     
+    def is_on_correct_side_of_ball(self, ball_x, ball_y):
+        """Check if robot is on the correct side of ball (behind it relative to goal)"""
+        if self.start_x is None or self.start_y is None:
+            return False
+            
+        with self.data_lock:
+            # Vector from ball to goal
+            ball_to_goal_x = self.start_x - ball_x
+            ball_to_goal_y = self.start_y - ball_y
+            
+            # Vector from ball to robot
+            ball_to_robot_x = self.robot_x - ball_x
+            ball_to_robot_y = self.robot_y - ball_y
+            
+            # Dot product to check if robot is on opposite side from goal
+            # If negative, robot is behind ball (correct side)
+            # If positive, robot is between ball and goal (wrong side)
+            dot_product = (ball_to_goal_x * ball_to_robot_x + 
+                          ball_to_goal_y * ball_to_robot_y)
+            
+            return dot_product < 0  # True if robot is behind ball
+    
     def calculate_angle_to_position(self, target_x, target_y):
         """Calculate angle from robot to target position"""
         with self.data_lock:
@@ -702,7 +724,7 @@ class BallSearchRobot:
                             # Start calculating behind position early (at 1.5m) for smooth approach
                             if self.search_state == SearchState.APPROACHING:
                                 if distance <= 1.5 and self.behind_ball_x is None:
-                                    # Early calculation of behind position for smooth curved approach
+                                    # Early calculation of behind position for planning
                                     print(f"📐 Pre-calculating behind position at {distance:.2f}m...")
                                     ball_x_for_calc = self.estimated_ball_x if self.estimated_ball_x is not None else world_x
                                     ball_y_for_calc = self.estimated_ball_y if self.estimated_ball_y is not None else world_y
@@ -710,9 +732,14 @@ class BallSearchRobot:
                                     if self.behind_ball_x is not None:
                                         print(f"📍 Target behind position: ({self.behind_ball_x:.2f}, {self.behind_ball_y:.2f})")
                                 
-                                # Transition to positioning when close enough
-                                if distance <= self.approach_min_distance:
-                                    print(f"✅ Close to ball! Distance: {distance:.2f}m")
+                                # Check if we're on correct side before transitioning
+                                ball_x_check = self.estimated_ball_x if self.estimated_ball_x is not None else world_x
+                                ball_y_check = self.estimated_ball_y if self.estimated_ball_y is not None else world_y
+                                on_correct_side = self.is_on_correct_side_of_ball(ball_x_check, ball_y_check)
+                                
+                                # Only transition to positioning when close AND on correct side
+                                if distance <= self.approach_min_distance and on_correct_side:
+                                    print(f"✅ Ready to position! Distance: {distance:.2f}m, correct side: {on_correct_side}")
                                     
                                     # Recalculate for final positioning if needed
                                     if self.behind_ball_x is None:
@@ -728,6 +755,10 @@ class BallSearchRobot:
                                         print("⚠️ Could not calculate behind position")
                                         self.search_state = SearchState.STOPPED
                                         break
+                                elif distance <= self.approach_min_distance and not on_correct_side:
+                                    # Too close but on wrong side - need to back off and arc around
+                                    print(f"⚠️ Too close on wrong side! Need to reposition...")
+                                    # Continue in APPROACHING state to handle arcing
                 
                 else:
                     print(f"⚠️  Camera error: {code}")
@@ -757,7 +788,7 @@ class BallSearchRobot:
                             self.stop_movement()
                             
                 elif self.search_state == SearchState.APPROACHING:
-                    # Approach the ball with curved path to get behind it
+                    # Approach the ball strategically to get behind it
                     if ball_detection and frame is not None:
                         # Get current distance to ball
                         world_x, world_y, distance = self.pixel_to_world_coordinates(
@@ -767,48 +798,104 @@ class BallSearchRobot:
                             ball_detection['radius']
                         )
                         
+                        # Update ball estimation for position checking
+                        ball_x = self.estimated_ball_x if self.estimated_ball_x is not None else world_x
+                        ball_y = self.estimated_ball_y if self.estimated_ball_y is not None else world_y
+                        
+                        # Check if we're on the correct side of the ball
+                        on_correct_side = self.is_on_correct_side_of_ball(ball_x, ball_y)
+                        
                         # Calculate angle to ball from center of camera
                         frame_width = frame.shape[1]
                         ball_center_x = ball_detection['center'][0]
                         normalized_x = (ball_center_x - frame_width/2) / (frame_width/2)
                         angle_to_ball = normalized_x * (self.camera_fov_horizontal/2) * (math.pi/180)
                         
-                        # Check if we should curve toward behind position (between 0.5m and 1.5m)
-                        if 0.5 < distance <= 1.5 and self.behind_ball_x is not None:
-                            # Calculate blended target: move toward a point between ball and behind position
-                            # As we get closer, weight shifts more toward behind position
-                            blend_factor = (distance - 0.5) / 1.0  # 1.0 at 1.5m, 0.0 at 0.5m
+                        # Decision logic based on position relative to ball
+                        if not on_correct_side and distance < 2.0:
+                            # We're on wrong side (between ball and goal) - need to arc around
+                            print(f"\n⚠️ On wrong side of ball! Arcing around at {distance:.2f}m...")
                             
-                            # Blend target position
-                            target_x = world_x * blend_factor + self.behind_ball_x * (1 - blend_factor)
-                            target_y = world_y * blend_factor + self.behind_ball_y * (1 - blend_factor)
-                            
-                            # Calculate angle to blended target
-                            angle_to_target = self.calculate_angle_to_position(target_x, target_y)
-                            
-                            # Move with curved path
-                            if abs(angle_to_target) > 0.15:
-                                # Turn toward blended target
-                                turn_rate = min(self.turn_speed * 0.7, abs(angle_to_target) * 1.5)
-                                if angle_to_target < 0:
-                                    turn_rate = -turn_rate
-                                # Move forward while turning for curved path
-                                ret = self.sport_client.Move(self.walk_speed * 0.5, 0.0, turn_rate)
-                                print(f"🌀 Curving behind ball (dist: {distance:.2f}m, blend: {blend_factor:.1f})", end='\r')
-                            else:
-                                # Mostly aligned, move forward
-                                self.move_forward()
-                                print(f"🚶 Approaching behind position (dist: {distance:.2f}m)", end='\r')
+                            # Calculate arc waypoint to the side of the ball
+                            # Get perpendicular vector to ball-goal line
+                            if self.start_x is not None:
+                                ball_to_goal_x = self.start_x - ball_x
+                                ball_to_goal_y = self.start_y - ball_y
+                                dist_to_goal = math.sqrt(ball_to_goal_x**2 + ball_to_goal_y**2)
+                                
+                                if dist_to_goal > 0.01:
+                                    # Normalize and get perpendicular
+                                    norm_x = ball_to_goal_x / dist_to_goal
+                                    norm_y = ball_to_goal_y / dist_to_goal
+                                    
+                                    # Perpendicular vector (90 degrees)
+                                    perp_x = -norm_y
+                                    perp_y = norm_x
+                                    
+                                    # Choose side based on current robot position
+                                    with self.data_lock:
+                                        cross_product = (ball_x - self.robot_x) * perp_y - (ball_y - self.robot_y) * perp_x
+                                    
+                                    if cross_product < 0:
+                                        perp_x = -perp_x
+                                        perp_y = -perp_y
+                                    
+                                    # Arc waypoint 1.5m to the side and slightly behind
+                                    arc_x = ball_x + perp_x * 1.2 - norm_x * 0.5
+                                    arc_y = ball_y + perp_y * 1.2 - norm_y * 0.5
+                                    
+                                    # Move toward arc waypoint
+                                    angle_to_arc = self.calculate_angle_to_position(arc_x, arc_y)
+                                    
+                                    if abs(angle_to_arc) > 0.2:
+                                        # Turn toward arc point
+                                        turn_rate = min(self.turn_speed * 0.6, abs(angle_to_arc) * 2.0)
+                                        if angle_to_arc < 0:
+                                            turn_rate = -turn_rate
+                                        ret = self.sport_client.Move(self.walk_speed * 0.3, 0.0, turn_rate)
+                                        print(f"🔄 Arcing around ball (angle: {math.degrees(angle_to_arc):.1f}°)", end='\r')
+                                    else:
+                                        # Move toward arc point
+                                        ret = self.sport_client.Move(self.walk_speed * 0.5, 0.0, 0.0)
+                                        print(f"➡️ Moving to side of ball", end='\r')
                         
-                        # Standard approach when far or very close
-                        else:
-                            # If ball is centered, move forward; otherwise turn toward it
-                            if abs(angle_to_ball) < 0.1:  # Ball is roughly centered (within ~6 degrees)
+                        # If we're on correct side or far enough, use normal approach
+                        elif on_correct_side and 0.8 < distance <= 1.5 and self.behind_ball_x is not None:
+                            # We're behind the ball - can approach more directly to final position
+                            angle_to_behind = self.calculate_angle_to_position(self.behind_ball_x, self.behind_ball_y)
+                            
+                            if abs(angle_to_behind) > 0.15:
+                                # Turn toward behind position
+                                turn_rate = min(self.turn_speed * 0.5, abs(angle_to_behind) * 1.5)
+                                if angle_to_behind < 0:
+                                    turn_rate = -turn_rate
+                                ret = self.sport_client.Move(self.walk_speed * 0.4, 0.0, turn_rate)
+                                print(f"✅ Approaching from behind (dist: {distance:.2f}m)", end='\r')
+                            else:
+                                # Move forward to behind position
                                 self.move_forward()
-                                print(f"🚶 Moving forward to ball (dist: {distance:.2f}m)", end='\r')
+                                print(f"✅ Moving to position (dist: {distance:.2f}m)", end='\r')
+                        
+                        # Far away - just approach the ball area
+                        elif distance > 1.5:
+                            # Standard approach when far
+                            if abs(angle_to_ball) < 0.1:
+                                self.move_forward()
+                                print(f"🚶 Approaching ball area (dist: {distance:.2f}m)", end='\r')
                             else:
                                 self.turn_toward_ball(angle_to_ball)
-                                print(f"🔄 Adjusting heading (angle: {math.degrees(angle_to_ball):.1f}°)", end='\r')
+                                print(f"🔄 Turning to ball (angle: {math.degrees(angle_to_ball):.1f}°)", end='\r')
+                        
+                        # Default careful approach
+                        else:
+                            # Very slow careful approach
+                            if abs(angle_to_ball) < 0.1:
+                                ret = self.sport_client.Move(self.walk_speed * 0.2, 0.0, 0.0)
+                                print(f"🐌 Careful approach (dist: {distance:.2f}m)", end='\r')
+                            else:
+                                turn_rate = angle_to_ball * -1.0
+                                ret = self.sport_client.Move(0.0, 0.0, turn_rate)
+                                print(f"🔄 Aligning carefully", end='\r')
                     else:
                         # Lost sight of ball, go back to searching
                         print("\n⚠️ Lost sight of ball! Resuming search...")

@@ -1,0 +1,72 @@
+[
+  {
+    "filename": "ball_captures/ball_001_1756503393.jpg",
+    "capture_id": 1,
+    "timestamp": 1756503393,
+    "ball_detected": true,
+    "confidence": 0.7835378733606604,
+    "position": [
+      959,
+      536
+    ],
+    "radius": 474.0,
+    "color_mode": "green",
+    "user_confirmed_ball": true
+  },
+  {
+    "filename": "ball_captures/ball_002_1756503396.jpg",
+    "capture_id": 2,
+    "timestamp": 1756503396,
+    "ball_detected": true,
+    "confidence": 0.7921146811358905,
+    "position": [
+      916,
+      523
+    ],
+    "radius": 487.0,
+    "color_mode": "green",
+    "user_confirmed_ball": true
+  },
+  {
+    "filename": "ball_captures/ball_003_1756503399.jpg",
+    "capture_id": 3,
+    "timestamp": 1756503399,
+    "ball_detected": true,
+    "confidence": 0.6684799254570505,
+    "position": [
+      1204,
+      866
+    ],
+    "radius": 231.0,
+    "color_mode": "green",
+    "user_confirmed_ball": true
+  },
+  {
+    "filename": "ball_captures/ball_004_1756503404.jpg",
+    "capture_id": 4,
+    "timestamp": 1756503404,
+    "ball_detected": true,
+    "confidence": 0.8072245697307168,
+    "position": [
+      1160,
+      791
+    ],
+    "radius": 237.0,
+    "color_mode": "green",
+    "user_confirmed_ball": true
+  },
+  {
+    "filename": "ball_captures/ball_005_1756503407.jpg",
+    "capture_id": 5,
+    "timestamp": 1756503407,
+    "ball_detected": true,
+    "confidence": 0.8015310618993052,
+    "position": [
+      1253,
+      738
+    ],
+    "radius": 206.0,
+    "color_mode": "green",
+    "user_confirmed_ball": true
+  }
+]

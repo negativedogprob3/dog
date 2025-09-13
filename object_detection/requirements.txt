@@ -1,0 +1,21 @@
+# Object Detection Requirements for Unitree Go2 Ball Tracking
+
+# Core computer vision
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# Data handling
+dataclasses-json>=0.5.0
+
+# Optional: Enhanced computer vision
+# opencv-contrib-python>=4.8.0  # For additional CV algorithms
+
+# Robot integration (already in main project)
+# unitree_sdk2py  # Installed via git clone in main setup
+
+# System dependencies that may need to be installed:
+# macOS: brew install opencv
+# Ubuntu: sudo apt-get install python3-opencv
+
+# Note: This project also depends on the robot controller from ../mike/server.py
+# which requires its own dependencies listed in ../mike/requirements.txt

@@ -65,14 +65,27 @@ cd mike
 - ⚠️  **AVOID "cycloneDX"** - That's a security scanning tool, not the DDS communication library we need!
 
 ## Environment & Technical Notes
+- **Python/pip**: Use `python3 -m pip` instead of `pip` - the system doesn't have `pip` in PATH
 - **Python Requirements**: Must use Python 3.11 with pyenv for Unitree SDK compatibility
+- **mike/ dependencies**: System has externally managed Python environment. For system-wide installs use `python3 -m pip install <package> --break-system-packages`. Key dependencies: websockets, opencv-python (cv2), numpy
 - **CycloneDDS**: Required for robot communication via DDS protocol
-- **Unitree SDK**: Real robot control requires `unitree_sdk2py` package with proper CycloneDDS setup
+- **Unitree SDK2 Python**: 
+  - SDK repo cloned at `unitree_sdk2_python/`
+  - Install with: `cd unitree_sdk2_python && python3 -m pip install -e . --break-system-packages`
+  - Requires CycloneDDS: Use conda environment for dependencies or build from source
+  - Network interface: Use `en8` for robot connection at 192.168.123.18
 - **Network Setup**: 
-  - Ethernet: Robot at 192.168.123.18, PC should be 192.168.123.51/24
+  - Ethernet: Robot at 192.168.123.18, PC interface en8 at 192.168.123.51/24
   - WiFi: Robot at 192.168.12.1, connect to network GO2_XXXXXX
 - **Unitree Go2 Robot**: 
   - Hand controller L2 double-click disables obstacle avoidance for ball interaction
-  - Camera access via SDK VideoClient or GStreamer: `udpsrc address=230.1.1.1 port=1720`
+  - Camera access via SDK VideoClient or GStreamer: `udpsrc address=230.1.1.1 port=1720 multicast-iface=en8`
   - Multiple controller types: Handheld (bimanual) and Companion (side-following)
   - Server shows "✅ Connected: 🤖 Control API + 📹 Camera + 🌐 Network" when fully working
+- **Object Detection System**: 
+  - Located in `object_detection/` folder with ball tracking for green balls
+  - Main files: `ball_tracker.py` (core algorithms), `camera_access.py` (integrated camera+tracking)
+  - Run with: `cd object_detection && python3 camera_access.py`
+  - Provides real-time green ball detection with world coordinate tracking
+  - Optimized for green balls with multiple color variants (green, bright_green, tennis_green)
+  - Integration ready with robot pose data for 3D position calculation
